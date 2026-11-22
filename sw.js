@@ -1,12 +1,12 @@
 /* 우리끼리 서비스 워커 — 앱 껍데기만 캐시해서 홈 화면 앱처럼 빠르게 뜨게 합니다.
    지도 타일(OpenStreetMap)·Supabase 요청은 캐시하지 않고 그대로 네트워크로 보냅니다. */
-const CACHE = 'urikkiri-v4';
+const CACHE = 'urikkiri-v5';
 const SHELL = [
   './',
   './index.html',
-  './styles.css',
-  './app.js',
-  './config.js',
+  './styles.css?v=5',
+  './app.js?v=5',
+  './config.js?v=5',
   './manifest.json',
   './vendor/leaflet/leaflet.css',
   './vendor/leaflet/leaflet.js',
