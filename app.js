@@ -267,7 +267,6 @@
     btnCollapse: $('#btnCollapse'),
     btnInvite: $('#btnInvite'),
     btnShare: $('#btnShare'),
-    btnLeave: $('#btnLeave'),
     btnUpdate: $('#btnUpdate'),
     updateSub: $('#updateSub'),
     btnAuto: $('#btnAuto'),
@@ -2250,46 +2249,8 @@
     }
   }
 
-  async function leaveRoom() {
-    if (!state.joined) return;
-    const myId = state.me ? state.me.user_id : null;
-    stopTimers();
-    stopWatch();
-
-    try {
-      if (state.store && myId) await state.store.remove(myId);
-    } catch (e) { console.warn('[우리끼리] 나가기 정리 실패', e); }
-    try { if (state.store) state.store.dispose(); } catch (e) {}
-
-    state.store = null;
-    state.joined = false;
-    state.members = new Map();
-    state.selected = null;
-    state.history = new Map();
-    modalUser = null;
-
-    if (state.map) {
-      try { state.map.remove(); } catch (e) {}
-      state.map = null;
-      state.routeGroup = null;
-    }
-    state.markers.clear();
-    state.markerSig.clear();
-
-    el.modal.hidden = true;
-    el.app.hidden = true;
-    el.join.hidden = false;
-    el.permHint.hidden = true;
-
-    el.inputRoom.value = '';
-    el.inputNick.value = state.me ? state.me.nickname : el.inputNick.value;
-    el.joinHint.textContent = '새 방을 만들면 친구에게 보낼 링크가 바로 생겨요.';
-    setUrlRoom('');
-    el.toast.classList.remove('is-visible');
-    state.room = '';
-    state.me = null;
-    setTimeout(() => el.inputRoom.focus(), 120);
-  }
+  /* 방은 한 번 들어가면 나가는 UI가 없습니다.
+     새로고침·앱 재실행 시에도 마지막 방에 그대로 머무릅니다. */
 
   /* ───────────────────────── 16. 이벤트 ───────────────────────── */
   function bindEvents() {
@@ -2329,7 +2290,6 @@
     el.btnShare.addEventListener('click', shareRoom);
     el.btnInvite.addEventListener('click', shareRoom);
     el.btnCopy.addEventListener('click', copyRoomLink);
-    el.btnLeave.addEventListener('click', leaveRoom);
 
     el.btnUpdate.addEventListener('click', manualUpdate);
     el.btnAuto.addEventListener('click', () => setAuto(!state.auto));
@@ -2458,6 +2418,18 @@
       if (lastNick) el.inputNick.value = lastNick;
       setTimeout(() => el.inputNick.focus(), 250);
       return;
+    }
+
+    // 마지막으로 있던 방이 있으면 묻지 않고 그 방으로 다시 들어간다 (방 나가기 없음)
+    const lastRoom = normalizeRoom(LS.get('locshare.lastRoom', '') || '');
+    if (lastRoom) {
+      el.inputRoom.value = lastRoom;
+      const lastSaved = LS.get(sessionKey(lastRoom), {});
+      if (lastSaved && lastSaved.nickname) {
+        el.inputNick.value = lastSaved.nickname;
+        enterRoom(lastRoom, lastSaved.nickname);
+        return;
+      }
     }
 
     if (lastNick) el.inputNick.value = lastNick;
