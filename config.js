@@ -17,8 +17,8 @@
    ───────────────────────────────────────────────────────────── */
 
 window.APP_CONFIG = {
-  SUPABASE_URL: "",        // 예: "https://abcdefghijklmnop.supabase.co"
-  SUPABASE_ANON_KEY: "",   // 예: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  SUPABASE_URL: "https://qqaogodxzfiuxhkkfjwt.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_6ZKzRAvNXXC0VJCrPkWhOg_a7e56eTx",
 
   ROOM_PREFIX: "DALKONG",  // '새 방 만들기'에서 쓰는 앞부분 (예: DALKONG-7Q4M)
   REFRESH_SECONDS: 10,     // 자동 갱신 주기(초)
