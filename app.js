@@ -573,6 +573,16 @@
   }
 
   /* ───────────────────────── 8. 렌더링: 상단 · 카드 · 요청 · 대화 ───────────────────────── */
+  /* 같은 내용이면 다시 그리지 않는다 (탭 위치·스크롤이 튀지 않게) */
+  const paint = { members: '', convos: '', reqs: '', outgoing: '', chat: '' };
+
+  function setHTML(node, html, key) {
+    if (!node) return;
+    if (key && paint[key] === html) return;
+    if (key) paint[key] = html;
+    node.innerHTML = html;
+  }
+
   function updateChrome() {
     if (!state.me) return;
     el.myCode.textContent = state.me.friend_code;
@@ -641,7 +651,7 @@
         + '<button type="button" data-act="add">친구 코드 입력</button></span></div>');
     }
 
-    el.memberList.innerHTML = cards.join('');
+    setHTML(el.memberList, cards.join(''), 'members');
     el.memberList.scrollLeft = keepScroll;
   }
 
@@ -649,12 +659,12 @@
     if (!el.reqBox) return;
     if (!state.incoming.length) {
       el.reqBox.hidden = true;
-      el.reqList.innerHTML = '';
+      setHTML(el.reqList, '', 'reqs');
       return;
     }
     el.reqBox.hidden = false;
     el.reqCount.textContent = state.incoming.length;
-    el.reqList.innerHTML = state.incoming.map((r) => (
+    setHTML(el.reqList, state.incoming.map((r) => (
       '<div class="req" data-req="' + esc(r.id) + '" data-uid="' + esc(r.user_id) + '">'
       + '<span class="req-avatar" style="--c:' + esc(r.color || colorFor(r.user_id)) + '">' + esc(initialOf(r.nickname)) + '</span>'
       + '<span class="req-body"><b>' + esc(r.nickname) + '</b><span>' + esc(timeAgo(r.created_at)) + ' · 친구 요청</span></span>'
@@ -662,7 +672,7 @@
       + '<button class="req-ok" type="button" data-accept="' + esc(r.id) + '">수락</button>'
       + '<button class="req-no" type="button" data-decline="' + esc(r.id) + '">거절</button>'
       + '</span></div>'
-    )).join('');
+    )).join(''), 'reqs');
   }
 
   function convoRowHTML(f) {
@@ -690,11 +700,11 @@
     });
 
     if (!list.length) {
-      el.convoList.innerHTML = '<div class="convo-empty">친구와 대화를 시작해 보세요.<br>'
-        + '친구 탭에서 친구를 누르면 [채팅] 버튼이 있어요.</div>';
+      setHTML(el.convoList, '<div class="convo-empty">친구와 대화를 시작해 보세요.<br>'
+        + '친구 탭에서 친구를 누르면 [채팅] 버튼이 있어요.</div>', 'convos');
       return;
     }
-    el.convoList.innerHTML = list.map(convoRowHTML).join('');
+    setHTML(el.convoList, list.map(convoRowHTML).join(''), 'convos');
   }
 
   function renderAll() {
@@ -1302,7 +1312,7 @@
     const list = state.messages.get(id) || [];
 
     if (!list.length) {
-      el.chatBody.innerHTML = '<div class="chat-empty">첫 메시지를 보내 보세요.<br>이 대화는 친구끼리만 보여요.</div>';
+      setHTML(el.chatBody, '<div class="chat-empty">첫 메시지를 보내 보세요.<br>이 대화는 친구끼리만 보여요.</div>', 'chat');
       return;
     }
 
@@ -1320,7 +1330,7 @@
         + '<span class="msg-time">' + esc(msgTime(msg.created_at)) + (mine ? (msg.read_at ? ' · 읽음' : '') : '') + '</span>'
         + '</div>';
     });
-    el.chatBody.innerHTML = html;
+    setHTML(el.chatBody, html, 'chat');
   }
 
   async function loadMessages(friendId, opts = {}) {
@@ -1492,15 +1502,15 @@
     if (!el.outgoingBox) return;
     if (!state.outgoing.length) {
       el.outgoingBox.hidden = true;
-      el.outgoingList.innerHTML = '';
+      setHTML(el.outgoingList, '', 'outgoing');
       return;
     }
     el.outgoingBox.hidden = false;
-    el.outgoingList.innerHTML = state.outgoing.map((r) => (
+    setHTML(el.outgoingList, state.outgoing.map((r) => (
       '<div class="out-item" data-uid="' + esc(r.user_id) + '">'
       + esc(r.nickname) + '<span>' + esc(timeAgo(r.created_at)) + ' 요청</span>'
       + '<button type="button" data-cancel="' + esc(r.user_id) + '">취소</button></div>'
-    )).join('');
+    )).join(''), 'outgoing');
   }
 
   /* ───────────────────────── 14. 친구 추가 모달 · 탭 ───────────────────────── */
