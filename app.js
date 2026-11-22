@@ -1183,6 +1183,7 @@
     const m = personById(modalUser);
     if (!m) return;
     const isMe = !!state.me && m.user_id === state.me.user_id;
+    el.mChat.setAttribute('data-unread', String(isMe ? 0 : Number(m.unread || 0)));
     const set = (key, html) => {
       const dd = el.mRows.querySelector('[data-row="' + key + '"] dd');
       if (dd) dd.innerHTML = html;
@@ -1209,6 +1210,7 @@
 
     renderRows(m, isMe);
 
+    el.mChat.setAttribute('data-unread', String(isMe ? 0 : Number(m.unread || 0)));
     el.mCard.classList.toggle('is-me', isMe);
     el.mEdit.hidden = !isMe;
     el.mSave.hidden = !isMe;
