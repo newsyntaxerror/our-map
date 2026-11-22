@@ -1653,3 +1653,16 @@ svg { display: block; }
 
 /* 접힌 상태에서는 채팅 탭도 높이를 비우지 않는다 */
 .sheet.is-collapsed.sheet--chat { height: auto; }
+
+/* 넓은 화면에서는 채팅도 가운데의 좁은 기둥으로 (휴대폰처럼) */
+@media (min-width: 720px) {
+  .chat {
+    left: 50%;
+    right: auto;
+    width: 460px;
+    margin-left: -230px;
+    border-left: 1px solid rgba(255, 255, 255, .6);
+    border-right: 1px solid rgba(255, 255, 255, .6);
+    box-shadow: 0 0 70px rgba(2, 8, 20, .38);
+  }
+}
