@@ -1666,3 +1666,9 @@ svg { display: block; }
     box-shadow: 0 0 70px rgba(2, 8, 20, .38);
   }
 }
+
+/* 대화가 짧아도 아래에서부터 쌓이게 (스크롤은 그대로) */
+.chat-body::before {
+  content: "";
+  margin-top: auto;
+}
