@@ -1683,3 +1683,14 @@ svg { display: block; }
   background: linear-gradient(to bottom, rgba(255, 255, 255, .82) 0%, #fff 26%);
 }
 .link-danger { margin-top: 10px; }
+
+/* 상세 시트 버튼은 한 줄에 (좁은 화면에서도) */
+.modal-actions { flex-wrap: nowrap; gap: 7px; }
+.modal-actions .btn {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 10px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+.modal-actions .btn svg { flex: none; }
