@@ -1546,6 +1546,8 @@
 
   function checkNearby() {
     if (!state.me || !state.joined) return;
+    // 실제 위치를 한 번도 못 받았으면(서울 도심 임시 좌표) 근처 알림을 계산하지 않는다
+    if (!state.gotFix) return;
     const me = state.me;
     if (me.lat == null || me.lng == null || !isFinite(me.lat) || !isFinite(me.lng)) return;
     const here = { lat: Number(me.lat), lng: Number(me.lng) };
