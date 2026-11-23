@@ -269,6 +269,53 @@ svg { display: block; }
 }
 .install-note b { color: #a8c0dc; font-weight: 700; }
 
+/* ── 로그인 / 회원가입 ── */
+.auth-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: #f1f5fa;
+  border-radius: 14px;
+}
+.auth-tab {
+  flex: 1 1 0;
+  height: 40px;
+  border-radius: 11px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: -.01em;
+  transition: background .15s, color .15s, box-shadow .15s;
+}
+.auth-tab.is-on {
+  color: var(--ink);
+  background: #fff;
+  box-shadow: 0 3px 10px rgba(15, 23, 42, .09);
+}
+
+.auth-form { display: flex; flex-direction: column; gap: 12px; }
+.auth-form[hidden] { display: none; }
+.auth-msg {
+  font-size: 12.5px;
+  line-height: 1.5;
+  font-weight: 600;
+  color: #b42318;
+  background: #fef3f2;
+  border-radius: 10px;
+  padding: 9px 11px;
+}
+.auth-msg.is-ok { color: #0a7a68; background: #ecfdf5; }
+.carry-note {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #0a6f61;
+  background: #ecfdf7;
+  border: 1px solid #c7f0e5;
+  border-radius: 11px;
+  padding: 10px 12px;
+}
+.carry-note b { display: block; font-weight: 800; margin-bottom: 2px; }
+
 /* =========================================================
    메인 화면 · 지도
    ========================================================= */
@@ -1056,6 +1103,70 @@ svg { display: block; }
 
 .modal-actions { display: flex; gap: 8px; margin-top: 16px; }
 .modal-actions .btn { min-height: 48px; font-size: 15px; }
+
+/* ───────────── 아이디 안내 띠 ───────────── */
+.id-banner {
+  position: absolute;
+  z-index: 470;
+  top: calc(var(--safe-top) + 64px);
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 9px 13px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .96);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .16);
+  border: 1px solid rgba(255, 255, 255, .8);
+}
+.id-banner-text {
+  flex: 1 1 auto;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  line-height: 1.35;
+}
+.id-banner-go {
+  flex: none;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  font-weight: 800;
+  color: #fff;
+  background: linear-gradient(135deg, #13c9b0, #0aa08c);
+  white-space: nowrap;
+}
+.id-banner-x {
+  flex: none;
+  width: 26px; height: 26px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--muted-2);
+}
+
+/* ───────────── 내 계정 ───────────── */
+.acct-block {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid #eef2f8;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.acct-line { display: flex; align-items: center; gap: 8px; }
+.acct-line b {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.acct-hint { font-size: 11.5px; line-height: 1.5; color: var(--muted); }
+.acct-actions { display: flex; gap: 8px; }
+.acct-actions .btn { min-height: 42px; font-size: 13.5px; }
+.acct-out { color: #b42318; }
 
 /* ───────────── 위치 권한 안내 ───────────── */
 .permission-hint {

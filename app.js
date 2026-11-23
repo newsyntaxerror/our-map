@@ -36,6 +36,37 @@
 
   const ME_KEY = 'urikkiri.me.v1';
   const histKey = (uid) => 'urikkiri.hist.' + uid;
+  const SESS_COOKIE = 'urikkiri_sess';
+  const SESS_MAX_AGE = 60 * 60 * 24 * 365;   // 1년
+
+  /* 세션은 localStorage 가 지워져도 남도록 쿠키에도 같이 적어 둡니다.
+     (iOS 사파리·홈 화면 앱에서 저장소가 비워지는 경우 대비) */
+  function setSessionCookie(uid, token, secret) {
+    try {
+      const val = encodeURIComponent([uid, token || '', secret || ''].join('|'));
+      const secure = location.protocol === 'https:' ? '; Secure' : '';
+      document.cookie = SESS_COOKIE + '=' + val
+        + '; path=/; max-age=' + SESS_MAX_AGE + '; SameSite=Lax' + secure;
+    } catch (e) {}
+  }
+
+  function readSessionCookie() {
+    try {
+      const hit = String(document.cookie || '').split(/;\s*/)
+        .find((c) => c.indexOf(SESS_COOKIE + '=') === 0);
+      if (!hit) return null;
+      const parts = decodeURIComponent(hit.slice(SESS_COOKIE.length + 1)).split('|');
+      if (!parts[0]) return null;
+      return { user_id: parts[0], session_token: parts[1] || '', secret: parts[2] || '' };
+    } catch (e) { return null; }
+  }
+
+  function clearSessionCookie() {
+    try {
+      const secure = location.protocol === 'https:' ? '; Secure' : '';
+      document.cookie = SESS_COOKIE + '=; path=/; max-age=0; SameSite=Lax' + secure;
+    } catch (e) {}
+  }
 
   /* ───────────────────────── 1. 작은 도구들 ───────────────────────── */
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -247,7 +278,11 @@
   /* ───────────────────────── 2. 화면 요소 ───────────────────────── */
   const el = {};
   [
-    'joinScreen', 'joinForm', 'inputNick', 'btnStart', 'inviteNote', 'inviteCodeLabel',
+    'joinScreen', 'inviteNote', 'inviteCodeLabel',
+    'authTabs', 'loginForm', 'loginId', 'loginPw', 'loginMsg', 'btnLogin',
+    'registerForm', 'inputNick', 'regId', 'regPw', 'regMsg', 'btnRegister', 'carryNote',
+    'idBanner', 'btnIdMake', 'btnIdLater', 'idModal', 'idForm', 'idInput', 'idPw', 'idMsg',
+    'btnIdSave', 'idClose',
     'app', 'map', 'meChip', 'meChipPin', 'myCode', 'myName', 'btnAddFriend', 'btnShare',
     'sheet', 'btnCollapse', 'tabs', 'tabFriends', 'tabChat', 'friendCount', 'chatBadge',
     'btnLocate', 'btnAddFriend2', 'reqBox', 'reqCount', 'reqList',
@@ -259,6 +294,7 @@
     'routeView', 'rvBack', 'rvClose', 'rvWho', 'rvMeta', 'rvTlToggle', 'rvTlLabel',
     'rvTimeline', 'rvTlCount', 'rvTlHide', 'rvTlList',
     'mBatt', 'mBattModes', 'mBattManual', 'mBattRange', 'mBattVal', 'mBattCharging',
+    'mAcct', 'mAcctId', 'mAcctHint', 'mAcctCreate', 'mAcctSwitch', 'mAcctLogout',
     'addModal', 'addForm', 'inputCode', 'btnSendReq', 'myCodeBig', 'btnCopyCode', 'btnCopyLink',
     'outgoingBox', 'outgoingList', 'addClose',
     'chatPanel', 'btnChatBack', 'chatAvatar', 'chatName', 'chatSub', 'btnChatLocate',
@@ -311,10 +347,19 @@
     addAfterStart: '',
     lastMsgAt: {},
     readSending: {},
+    authMode: 'login',
+    authBusy: false,
+    carry: null,          // 이 기기에 남아 있는(아이디를 붙일) 신원
   };
 
+  /* 서버에 보내는 열쇠: 로그인으로 받은 세션 토큰을 우선 쓰고, 없으면 예전 비밀 토큰 */
+  function mySecret() {
+    if (!state.me) return '';
+    return state.me.session_token || state.me.secret || '';
+  }
+
   function selfArgs() {
-    return { p_user: state.me.user_id, p_secret: state.me.secret };
+    return { p_user: state.me.user_id, p_secret: mySecret() };
   }
 
   function personById(id) {
@@ -452,6 +497,8 @@
     LS.set(ME_KEY, {
       user_id: state.me.user_id,
       secret: state.me.secret,
+      session_token: state.me.session_token || '',
+      username: state.me.username || '',
       friend_code: state.me.friend_code,
       nickname: state.me.nickname,
       emoji: state.me.emoji,
@@ -462,6 +509,7 @@
       accuracy: state.me.accuracy,
       auto: state.auto,
     });
+    setSessionCookie(state.me.user_id, state.me.session_token || state.me.secret, state.me.secret);
   }
 
   function applyProfile(prof) {
@@ -472,28 +520,66 @@
     state.me.emoji = prof.emoji || '🙂';
     state.me.status_text = prof.status_text || '';
     state.me.color = prof.color || colorFor(prof.user_id);
+    state.me.username = prof.username || '';
   }
 
-  async function bootstrap(nickname) {
-    let saved = LS.get(ME_KEY, null);
-    if (!saved || !saved.user_id || !saved.secret) {
+  /* localStorage → 없으면 쿠키에서 신원 복원 */
+  function loadIdentity() {
+    const saved = LS.get(ME_KEY, null);
+    if (saved && saved.user_id && (saved.secret || saved.session_token)) return saved;
+    const c = readSessionCookie();
+    if (c && c.user_id && (c.session_token || c.secret)) {
+      return {
+        user_id: c.user_id,
+        secret: c.secret || c.session_token,
+        session_token: c.session_token || '',
+        nickname: LS.get('urikkiri.lastNick', ''),
+        fromCookie: true,
+      };
+    }
+    return null;
+  }
+
+  function freshMe(identity) {
+    return Object.assign({
+      emoji: '🙂', status_text: '', color: colorFor(identity.user_id),
+      lat: BASE.lat + 0.0008,
+      lng: BASE.lng - 0.0006,
+      accuracy: null,
+      speed_kmh: null, stay_since: null, updated_at: null,
+    }, identity);
+  }
+
+  async function bootstrap(nickname, identity) {
+    let saved = identity || loadIdentity();
+    if (!saved || !saved.user_id || !(saved.secret || saved.session_token)) {
       saved = newIdentity();
     }
-    state.me = Object.assign({
-      emoji: '🙂', status_text: '', color: colorFor(saved.user_id),
-      lat: isFinite(saved.lat) ? saved.lat : BASE.lat + 0.0008,
-      lng: isFinite(saved.lng) ? saved.lng : BASE.lng - 0.0006,
-      accuracy: saved.accuracy == null ? null : saved.accuracy,
-      speed_kmh: null, stay_since: null, updated_at: null,
-    }, saved);
+    state.me = freshMe(saved);
 
     const prof = await API.rpc('friend_bootstrap', {
       p_user: state.me.user_id,
-      p_secret: state.me.secret,
+      p_secret: mySecret(),
       p_nickname: String(nickname || '').trim().slice(0, 12),
     });
     applyProfile(prof);
     state.auto = saved.auto !== false;
+    saveMe();
+    return state.me;
+  }
+
+  /* 로그인·가입 응답(프로필 + 세션 토큰)으로 내 신원을 세팅 */
+  function adoptSession(out) {
+    const prof = (out && out.profile) || {};
+    if (!prof.user_id || !out.session_token) throw new Error('로그인 응답이 올바르지 않아요');
+    state.me = freshMe({
+      user_id: prof.user_id,
+      secret: out.session_token,
+      session_token: out.session_token,
+      username: prof.username || '',
+    });
+    applyProfile(prof);
+    state.auto = true;
     saveMe();
     return state.me;
   }
@@ -605,7 +691,81 @@
     el.btnAuto.setAttribute('aria-pressed', String(state.auto));
     el.updateSub.textContent = state.me.updated_at ? (isStale(state.me) ? '오래됨' : timeAgo(state.me.updated_at)) : '대기 중';
 
+    renderIdBanner();
     updateSheetHeight();
+  }
+
+  /* 아이디가 아직 없으면 상단에 한 번 안내 */
+  function idHintKey() {
+    return 'urikkiri.idHint.' + (state.me ? state.me.user_id : '');
+  }
+
+  function renderIdBanner() {
+    if (!el.idBanner) return;
+    const show = !!state.me && !state.me.username && LS.get(idHintKey(), false) !== true;
+    el.idBanner.hidden = !show;
+  }
+
+  function renderAcct(isMe) {
+    if (!el.mAcct) return;
+    el.mAcct.hidden = !isMe;
+    if (!isMe || !state.me) return;
+    const uname = state.me.username || '';
+    el.mAcctId.textContent = uname ? '@' + uname : '아이디 없음';
+    el.mAcctHint.textContent = uname
+      ? '이 아이디로 다른 기기에서 로그인하면 친구·채팅·동선이 그대로 보여요.'
+      : '아이디를 만들면 앱을 지우거나 기기를 바꿔도 친구·채팅이 사라지지 않아요.';
+    el.mAcctCreate.hidden = !!uname;
+  }
+
+  function openIdModal() {
+    if (!state.me || state.me.username) return;
+    setAuthMsg(el.idMsg, '');
+    el.idInput.value = '';
+    el.idPw.value = '';
+    el.idModal.hidden = false;
+    setTimeout(() => { try { el.idInput.focus(); } catch (e) {} }, 120);
+  }
+
+  function closeIdModal() {
+    el.idModal.hidden = true;
+  }
+
+  async function saveUsername() {
+    if (!state.me || state.authBusy) return;
+    const uname = String(el.idInput.value || '').trim().toLowerCase();
+    const pw = String(el.idPw.value || '');
+    setAuthMsg(el.idMsg, '');
+    if (!USERNAME_RE.test(uname)) {
+      setAuthMsg(el.idMsg, '아이디는 영문으로 시작하는 영문·숫자·밑줄 4~20자로 정해 주세요');
+      el.idInput.focus();
+      return;
+    }
+    if (pw.length < 6) { setAuthMsg(el.idMsg, '비밀번호는 6자 이상으로 정해 주세요'); el.idPw.focus(); return; }
+
+    state.authBusy = true;
+    setBtnBusy(el.btnIdSave, true, '만드는 중…');
+    try {
+      const out = await API.rpc('auth_link_existing', Object.assign(selfArgs(), {
+        p_username: uname,
+        p_password: pw,
+      }));
+      if (out && out.session_token) state.me.session_token = out.session_token;
+      if (out && out.profile) applyProfile(out.profile);
+      else state.me.username = uname;
+      saveMe();
+      LS.set('urikkiri.lastUser', uname);
+      state.authBusy = false;
+      setBtnBusy(el.btnIdSave, false, '아이디 만들기');
+      closeIdModal();
+      renderAll();
+      if (modalUser === state.me.user_id) renderAcct(true);
+      toast('아이디 @' + uname + ' 를 만들었어요 — 이제 기기를 바꿔도 이어져요', 3800);
+    } catch (e) {
+      state.authBusy = false;
+      setBtnBusy(el.btnIdSave, false, '아이디 만들기');
+      setAuthMsg(el.idMsg, authErrText(e));
+    }
   }
 
   function sortedFriends() {
@@ -1558,6 +1718,7 @@
     el.mChat.setAttribute('data-unread', String(isMe ? 0 : Number(m.unread || 0)));
     el.mCard.classList.toggle('is-me', isMe);
     el.mEdit.hidden = !isMe;
+    renderAcct(isMe);
     el.mSave.hidden = !isMe;
     el.mChat.hidden = isMe;
     el.mLocate.hidden = isMe || m.lat == null;
@@ -2534,40 +2695,171 @@
     clearAddParam();
   }
 
-  function setJoinBusy(busy) {
-    el.btnStart.disabled = busy;
-    el.btnStart.textContent = busy ? '시작하는 중…' : '시작하기';
+  /* ───────────────────────── 20-2. 로그인 / 회원가입 ───────────────────────── */
+  const USERNAME_RE = /^[a-z][a-z0-9_]{3,19}$/;
+
+  function authErrText(e) {
+    const raw = String((e && (e.detail || e.message)) || e || '');
+    if (/invalid_login/.test(raw)) return '아이디 또는 비밀번호가 맞지 않아요';
+    if (/no_password/.test(raw)) return '이 아이디에는 비밀번호가 없어요. 이 기기에서 [처음이에요]로 아이디를 만들어 주세요';
+    if (/username_taken/.test(raw)) return '이미 쓰고 있는 아이디예요 — 다른 아이디로 해보세요';
+    if (/invalid_username/.test(raw)) return '아이디는 영문으로 시작하는 영문·숫자·밑줄 4~20자로 정해 주세요';
+    if (/invalid_password/.test(raw)) return '비밀번호는 6자 이상으로 정해 주세요';
+    if (/already_has_username/.test(raw)) return '이 기기 계정에는 이미 아이디가 있어요 — [로그인]에서 그 아이디로 들어와 주세요';
+    if (/unauthorized/.test(raw)) return '내 정보를 다시 확인해야 해요 — 로그인해 주세요';
+    if (/Failed to fetch|NetworkError|Load failed/i.test(raw)) return '인터넷 연결을 확인해 주세요';
+    return raw.length > 90 ? raw.slice(0, 90) + '…' : raw;
   }
 
-  async function startFromJoin(nickname) {
-    if (state.joining) return;
-    state.joining = true;
-    setJoinBusy(true);
+  function setAuthMsg(node, text, ok) {
+    if (!node) return;
+    node.textContent = text || '';
+    node.hidden = !text;
+    node.classList.toggle('is-ok', !!ok);
+  }
+
+  function setAuthMode(mode) {
+    state.authMode = mode === 'register' ? 'register' : 'login';
+    $$('#authTabs [data-auth]').forEach((b) => {
+      const on = b.getAttribute('data-auth') === state.authMode;
+      b.classList.toggle('is-on', on);
+      b.setAttribute('aria-selected', String(on));
+    });
+    if (el.loginForm) el.loginForm.hidden = state.authMode !== 'login';
+    if (el.registerForm) el.registerForm.hidden = state.authMode !== 'register';
+    if (el.carryNote) el.carryNote.hidden = !(state.carry && state.authMode === 'register');
+  }
+
+  function showJoin(mode, message) {
+    el.joinScreen.hidden = false;
+    el.app.hidden = true;
+    setAuthMode(mode || 'login');
+    setAuthMsg(el.loginMsg, '');
+    setAuthMsg(el.regMsg, '');
+    if (message) setAuthMsg(state.authMode === 'login' ? el.loginMsg : el.regMsg, message);
+    const lastUser = LS.get('urikkiri.lastUser', '');
+    if (lastUser) {
+      if (el.loginId && !el.loginId.value) el.loginId.value = lastUser;
+      if (el.regId && !el.regId.value) el.regId.value = lastUser;
+    }
+    const lastNick = LS.get('urikkiri.lastNick', '');
+    if (lastNick && el.inputNick && !el.inputNick.value) el.inputNick.value = lastNick;
+  }
+
+  function setBtnBusy(btn, busy, label) {
+    if (!btn) return;
+    if (busy) {
+      if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = label || '처리 중…';
+    } else {
+      btn.disabled = false;
+      btn.textContent = btn.dataset.label || label || '확인';
+    }
+  }
+
+  async function submitLogin() {
+    if (state.joining || state.authBusy) return;
+    const uname = String(el.loginId.value || '').trim().toLowerCase();
+    const pw = String(el.loginPw.value || '');
+    setAuthMsg(el.loginMsg, '');
+    if (!uname) { setAuthMsg(el.loginMsg, '아이디를 입력해 주세요'); el.loginId.focus(); return; }
+    if (!pw) { setAuthMsg(el.loginMsg, '비밀번호를 입력해 주세요'); el.loginPw.focus(); return; }
+
+    state.authBusy = true;
+    setBtnBusy(el.btnLogin, true, '로그인 중…');
     try {
-      await bootstrap(nickname);
+      const out = await API.rpc('auth_login', { p_username: uname, p_password: pw });
+      adoptSession(out);
+      state.carry = null;
+      LS.set('urikkiri.lastUser', uname);
       LS.set('urikkiri.lastNick', state.me.nickname);
-      state.joining = false;
-      setJoinBusy(false);
+      state.authBusy = false;
+      setBtnBusy(el.btnLogin, false, '로그인');
       await enterApp();
     } catch (e) {
-      console.error('[우리끼리] 시작 실패', e);
-      state.joining = false;
-      setJoinBusy(false);
-      toast('시작하지 못했어요 — ' + errText(e), 5200);
+      state.authBusy = false;
+      setBtnBusy(el.btnLogin, false, '로그인');
+      setAuthMsg(el.loginMsg, authErrText(e));
     }
+  }
+
+  async function submitRegister() {
+    if (state.joining || state.authBusy) return;
+    const nick = String(el.inputNick.value || '').trim().slice(0, 12);
+    const uname = String(el.regId.value || '').trim().toLowerCase();
+    const pw = String(el.regPw.value || '');
+    setAuthMsg(el.regMsg, '');
+    if (!nick) { setAuthMsg(el.regMsg, '닉네임을 입력해 주세요'); el.inputNick.focus(); return; }
+    if (!USERNAME_RE.test(uname)) {
+      setAuthMsg(el.regMsg, '아이디는 영문으로 시작하는 영문·숫자·밑줄 4~20자로 정해 주세요');
+      el.regId.focus();
+      return;
+    }
+    if (pw.length < 6) { setAuthMsg(el.regMsg, '비밀번호는 6자 이상으로 정해 주세요'); el.regPw.focus(); return; }
+
+    state.authBusy = true;
+    setBtnBusy(el.btnRegister, true, '만드는 중…');
+    const carry = state.carry;
+    try {
+      const out = await API.rpc('auth_register', {
+        p_username: uname,
+        p_password: pw,
+        p_nickname: nick,
+        p_link_user: carry ? carry.user_id : null,
+        p_link_secret: carry ? (carry.session_token || carry.secret) : null,
+      });
+      adoptSession(out);
+      state.carry = null;
+      LS.set('urikkiri.lastUser', uname);
+      LS.set('urikkiri.lastNick', state.me.nickname);
+      state.authBusy = false;
+      setBtnBusy(el.btnRegister, false, '회원가입');
+      await enterApp();
+      toast(out.linked ? '아이디를 만들었어요 — 쓰던 친구·채팅이 그대로 이어져요' : '가입 완료 — 친구 코드를 친구에게 알려 주세요', 3800);
+    } catch (e) {
+      state.authBusy = false;
+      setBtnBusy(el.btnRegister, false, '회원가입');
+      setAuthMsg(el.regMsg, authErrText(e));
+    }
+  }
+
+  async function signOut(switchAccount) {
+    const me = state.me;
+    try { if (me && READY) await API.rpc('auth_logout', selfArgs()); } catch (e) {}
+    clearSessionCookie();
+    LS.del(ME_KEY);
+    if (me) LS.del('urikkiri.idHint.' + me.user_id);
+    state.me = null;
+    state.joined = false;
+    try { LS.set('urikkiri.lastNick', me ? me.nickname : ''); } catch (e) {}
+    LS.set('urikkiri.authNext', switchAccount ? 'switch' : 'login');
+    location.reload();
   }
 
   /* ───────────────────────── 21. 이벤트 ───────────────────────── */
   function bindEvents() {
-    el.joinForm.addEventListener('submit', (e) => {
-      e.preventDefault();
-      const nick = el.inputNick.value.trim();
-      if (!nick) { toast('닉네임을 입력해 주세요', 2000); el.inputNick.focus(); return; }
-      startFromJoin(nick);
+    el.authTabs.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-auth]');
+      if (!btn) return;
+      setAuthMode(btn.getAttribute('data-auth'));
+      setAuthMsg(el.loginMsg, '');
+      setAuthMsg(el.regMsg, '');
+      const first = state.authMode === 'login' ? el.loginId : el.inputNick;
+      setTimeout(() => { try { first.focus(); } catch (err) {} }, 90);
     });
+    el.loginForm.addEventListener('submit', (e) => { e.preventDefault(); submitLogin(); });
+    el.registerForm.addEventListener('submit', (e) => { e.preventDefault(); submitRegister(); });
     el.inputNick.addEventListener('input', () => {
       el.inputNick.value = el.inputNick.value.slice(0, 12);
     });
+    const tidyUser = (input) => {
+      const pos = input.selectionStart;
+      input.value = String(input.value || '').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 20);
+      try { input.setSelectionRange(pos, pos); } catch (err) {}
+    };
+    el.regId.addEventListener('input', () => tidyUser(el.regId));
+    el.loginId.addEventListener('input', () => tidyUser(el.loginId));
 
     el.meChip.addEventListener('click', () => openMember(state.me.user_id));
     el.btnShare.addEventListener('click', shareMyLink);
@@ -2634,8 +2926,35 @@
       if (e.target.hasAttribute('data-close')) closeAddModal();
     });
 
+    /* 아이디 만들기 · 로그아웃 · 계정 전환 */
+    el.btnIdMake.addEventListener('click', openIdModal);
+    el.mAcctCreate.addEventListener('click', openIdModal);
+    el.btnIdLater.addEventListener('click', () => {
+      if (state.me) LS.set(idHintKey(), true);
+      renderIdBanner();
+    });
+    el.idModal.addEventListener('click', (e) => {
+      if (e.target.hasAttribute('data-close')) closeIdModal();
+    });
+    el.idClose.addEventListener('click', closeIdModal);
+    el.idForm.addEventListener('submit', (e) => { e.preventDefault(); saveUsername(); });
+    el.idInput.addEventListener('input', () => {
+      const pos = el.idInput.selectionStart;
+      el.idInput.value = String(el.idInput.value || '').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 20);
+      try { el.idInput.setSelectionRange(pos, pos); } catch (err) {}
+    });
+    el.mAcctLogout.addEventListener('click', () => {
+      if (!confirm('로그아웃하면 이 기기에서는 다시 아이디로 로그인해야 해요. 친구·채팅은 서버에 그대로 남아요.')) return;
+      signOut(false);
+    });
+    el.mAcctSwitch.addEventListener('click', () => {
+      if (!confirm('다른 계정으로 들어갈까요? 지금 계정의 친구·채팅은 서버에 그대로 남아 있어요.')) return;
+      signOut(true);
+    });
+
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
+      if (!el.idModal.hidden) { closeIdModal(); return; }
       if (!el.addModal.hidden) { closeAddModal(); return; }
       if (!el.chatPanel.hidden) { closeChat(); return; }
       if (state.routeView) { closeRouteView(); return; }
@@ -2779,39 +3098,51 @@
     }
 
     if (!READY) {
-      el.joinScreen.hidden = false;
+      showJoin('login');
       toast('서버 설정(config.js)이 비어 있어요', 5000);
       return;
     }
 
-    const saved = LS.get(ME_KEY, null);
-    if (saved && saved.user_id && saved.secret) {
+    const saved = loadIdentity();
+    state.addAfterStart = addCode;
+
+    /* 이 기기에 남은 신원이 있고, 아직 아이디가 없으면 가입 화면에서 그 계정에 아이디를 붙일 수 있다 */
+    state.carry = saved && !saved.username ? saved : null;
+
+    if (saved) {
       try {
-        await bootstrap(saved.nickname || '나');
-        state.addAfterStart = addCode;
+        await bootstrap(saved.nickname || '', saved);
         await enterApp();
         return;
       } catch (e) {
-        if (/unauthorized/.test(String(e.detail || e.message))) {
+        const detail = String(e.detail || e.message || e);
+        if (/unauthorized/.test(detail)) {
+          // 열쇠가 만료됐다: 아이디가 있으면 로그인, 없으면 새로 시작
+          console.warn('[우리끼리] 저장된 열쇠가 만료됐어요 — 다시 로그인해 주세요');
           LS.del(ME_KEY);
-          console.warn('[우리끼리] 저장된 내 정보가 서버와 맞지 않아 새로 시작합니다');
-        } else {
-          console.warn('[우리끼리] 자동 시작 실패', e);
-          state.addAfterStart = addCode;
-          // 잠시 후 다시 시도할 수 있도록 시작 화면을 보여 준다
-          el.joinScreen.hidden = false;
-          toast('연결이 잠시 불안정해요 — 다시 시도해 주세요', 4200);
-          if (saved.nickname) el.inputNick.value = saved.nickname;
+          clearSessionCookie();
+          state.carry = null;
+          const lastUser = saved.username || LS.get('urikkiri.lastUser', '');
+          showJoin(lastUser ? 'login' : 'register', lastUser
+            ? '세션이 만료됐어요 — 아이디로 다시 로그인해 주세요'
+            : '이 기기의 계정을 다시 확인해야 해요');
           return;
         }
+        console.warn('[우리끼리] 자동 시작 실패', e);
+        // 연결 문제: 열쇠는 그대로 두고 다시 시도할 수 있게 한다
+        showJoin(saved.username ? 'login' : 'register', '연결이 잠시 불안정해요 — 다시 시도해 주세요');
+        return;
       }
     }
 
-    state.addAfterStart = addCode;
-    el.joinScreen.hidden = false;
-    const lastNick = LS.get('urikkiri.lastNick', '');
-    if (lastNick) el.inputNick.value = lastNick;
-    setTimeout(() => { try { el.inputNick.focus(); } catch (e) {} }, 250);
+    const next = LS.get('urikkiri.authNext', '');
+    if (next) LS.del('urikkiri.authNext');
+    showJoin(next === 'switch' ? 'login' : (addCode ? 'register' : 'login'));
+    if (next === 'switch') {
+      el.loginId.value = '';
+      el.loginPw.value = '';
+      setAuthMsg(el.loginMsg, '다른 계정으로 로그인해 주세요');
+    }
   }
 
   window.__URIKKIRI__ = {
