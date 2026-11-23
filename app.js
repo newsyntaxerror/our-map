@@ -23,6 +23,10 @@
   const STALE_MS = 10 * 60 * 1000;                          // 10분 넘게 갱신 없으면 '오프라인'
   const PALETTE = ['#0fb9a3', '#f59e0b', '#6366f1', '#ec4899', '#8b5cf6', '#0ea5e9', '#ef4444', '#14b8a6'];
   const EMOJIS = ['🙂', '🙌', '🏃', '🚇', '💼', '🏠', '🍜', '😴'];
+  const POKE_EMOJIS = ['👋', '❤️', '☕', '📍', '😆'];
+  const AUTO_STATUS_MIN_MS = 5 * 60 * 1000;    // 5분 이상 머문 곳은 자동 상태로
+  const MUTE_KEY = 'urikkiri.muted.v1';        // 개인/그룹별 알림 끄기
+  const NOTICE_MS = 5600;
 
   /* 배터리 API는 안드로이드 크롬 등에서만 열려 있어요(iOS 사파리는 막혀 있음). */
   const BATT_API = typeof navigator !== 'undefined' && typeof navigator.getBattery === 'function';
@@ -339,6 +343,107 @@
     return null;
   }
 
+  /* ── 프로필 사진 ──
+     사진은 서버에 180×180 JPEG data URL(40KB 안팎)로만 올라갑니다.
+     화면에서는 원형 avatar 의 background-image 로 깔아 어디서나 같은 모양으로 보입니다. */
+  const AVATAR_RE = /^data:image\/(?:jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+
+  function avatarUrlOf(p) {
+    const u = p && p.avatar_url;
+    return typeof u === 'string' && AVATAR_RE.test(u) ? u : '';
+  }
+
+  function hasPhoto(p) { return !!avatarUrlOf(p); }
+
+  function avatarStyleOf(p) {
+    const color = esc((p && p.color) || colorFor(p && p.user_id));
+    const url = avatarUrlOf(p);
+    return '--c:' + color + (url ? ';background-image:url(' + url + ')' : '');
+  }
+
+  function avatarClass(base, p) { return base + (hasPhoto(p) ? ' has-photo' : ''); }
+
+  /* ── 온라인 표시 ──
+     지금 위치를 10분 안에 보낸 사람(그리고 나)은 초록 링이 은은하게 빗나고,
+     아바타 옆에 작은 ON 배지가 붙습니다. */
+  function isOnline(m) {
+    if (!m) return false;
+    if (state.me && m.user_id === state.me.user_id) return true;
+    if (m.hidden) return false;
+    return m.lat != null && isFinite(m.lat) && !isStale(m);
+  }
+
+  function onlineCls(p) { return isOnline(p) ? ' is-online' : ''; }
+
+  function onlineBadge(p) { return isOnline(p) ? '<span class="on-badge">ON</span>' : ''; }
+
+  function paintAvatar(node, p, label) {
+    if (!node) return;
+    node.classList.toggle('has-photo', hasPhoto(p));
+    node.style.backgroundImage = hasPhoto(p) ? 'url(' + avatarUrlOf(p) + ')' : '';
+    node.style.setProperty('--c', (p && p.color) || colorFor(p && p.user_id));
+    node.textContent = label != null ? label : initialOf(p && p.nickname);
+    node.classList.toggle('is-online', isOnline(p));
+    if (isOnline(p)) {
+      const badge = document.createElement('span');
+      badge.className = 'on-badge';
+      badge.textContent = 'ON';
+      node.appendChild(badge);
+    }
+  }
+
+  /* ── 자동 상태 ──
+     직접 남긴 상태가 비어 있고, 5분 이상 한 곳에 머물면
+     그 자리의 장소·업종(OpenStreetMap)으로 '☕ 스타벅스 · 12분째' 를 대신 보여줍니다. */
+  function autoStatusOf(m) {
+    if (!m || m.hidden || m.status_text) return null;
+    if (m.lat == null || m.lng == null || !isFinite(m.lat) || !isFinite(m.lng)) return null;
+    const since = m.stay_since || staySinceOf(m);
+    if (!since) return null;
+    const ms = Date.now() - new Date(since).getTime();
+    if (!isFinite(ms) || ms < AUTO_STATUS_MIN_MS) return null;
+
+    const mins = stayChip(since);
+    const suffix = /째$/.test(mins) ? '' : '째';
+    const hit = placeCached(m.lat, m.lng);
+    if (hit && hit.ok && hit.name) {
+      const meta = placeMeta(hit);
+      return { ico: meta.ico, text: hit.name + ' · ' + mins + suffix, label: meta.ico + ' ' + hit.name + ' · ' + mins + suffix, place: true };
+    }
+    if (!hit) placeSoon(m.lat, m.lng, () => scheduleAutoStatusRender());
+    return { ico: '⏱', text: mins + suffix + ' 머무는 중', label: '⏱ ' + mins + suffix + ' 머무는 중', place: false };
+  }
+
+  function scheduleAutoStatusRender() {
+    if (state.autoStatusTimer) return;
+    state.autoStatusTimer = setTimeout(() => {
+      state.autoStatusTimer = null;
+      if (!state.joined) return;
+      renderList();
+      renderPins();
+      renderGroups();
+      renderConvos();
+      refreshModalLive();
+    }, 700);
+  }
+
+  /* ── 알림 끄기/켜기 ── */
+  function isMuted(id) { return !!id && state.muted[id] === true; }
+
+  function setMuted(id, on) {
+    if (!id) return;
+    if (on) state.muted[id] = true;
+    else delete state.muted[id];
+    LS.set(MUTE_KEY, state.muted);
+    const isGroup = isGroupChat(id);
+    toast(on
+      ? (isGroup ? '이 그룹 알림을 껐어요 🔕' : '이 사람 알림을 껐어요 🔕')
+      : (isGroup ? '이 그룹 알림을 다시 켰어요 🔔' : '이 사람 알림을 다시 켰어요 🔔'), 2200);
+    renderGroups();
+    renderConvos();
+    if (modalUser === id) renderMuteRow(personById(id), false);
+  }
+
   /* ───────────────────────── 2. 화면 요소 ───────────────────────── */
   const el = {};
   [
@@ -359,6 +464,10 @@
     'memberModal', 'mCard', 'mAvatar', 'mName', 'mStatus', 'mRows', 'mEdit', 'mNickInput',
     'mEmojis', 'mStatusInput', 'mCopyCode', 'mClose', 'mChat', 'mSave', 'mLocate', 'mRemove',
     'mRouteBlock', 'mRouteSum', 'mRouteHint', 'mRouteOpen',
+    'mPokeBlock', 'mPokeBtns', 'mMuteRow', 'mMute',
+    'mPhotoInput', 'mPhotoPreview', 'mPhotoPick', 'mPhotoClear',
+    'mNotifState', 'mNotifAsk',
+    'notice', 'noticeIco', 'noticeTitle', 'noticeText', 'noticeClose', 'pokeLayer',
     'routeView', 'rvBack', 'rvClose', 'rvWho', 'rvMeta', 'rvTlToggle', 'rvTlLabel',
     'rvTimeline', 'rvTlCount', 'rvTlHide', 'rvTlList',
     'mBatt', 'mBattModes', 'mBattManual', 'mBattRange', 'mBattVal', 'mBattCharging',
@@ -426,6 +535,17 @@
     viewGroup: null,        // 지도에서 보고 있는 그룹
     groupMode: 'create',    // 그룹 모달 모드
     addGroupCode: '',       // 초대 링크(?group=)로 받은 코드
+    muted: LS.get(MUTE_KEY, null) || {},   // user_id / group_id → 알림 끔
+    friendBase: false,      // 첫 피드는 알림 기준만 잡는다
+    groupBase: false,
+    groupPeopleBase: false,
+    notifPerm: (typeof Notification === 'undefined') ? 'unsupported' : Notification.permission,
+    noticeTimer: null,
+    noticeOpen: null,
+    lastNoticeKey: '',
+    lastNoticeAt: 0,
+    pokeIds: new Set(),
+    autoStatusTimer: null,
   };
 
   /* ───────────────────── 3-B. 머문 곳 장소 판별 (OpenStreetMap · 키 없음) ─────────────────────
@@ -758,6 +878,7 @@
   function totalUnread() {
     let n = 0;
     for (const f of state.friends.values()) n += Number(f.unread || 0);
+    for (const g of state.groups.values()) n += Number(g.unread || 0);
     return n;
   }
 
@@ -911,6 +1032,7 @@
       emoji: state.me.emoji,
       status_text: state.me.status_text,
       color: state.me.color,
+      avatar_url: state.me.avatar_url || '',
       lat: state.me.lat,
       lng: state.me.lng,
       accuracy: state.me.accuracy,
@@ -955,6 +1077,7 @@
     state.me.emoji = prof.emoji || '🙂';
     state.me.status_text = prof.status_text || '';
     state.me.color = prof.color || colorFor(prof.user_id);
+    state.me.avatar_url = prof.avatar_url || '';
     state.me.username = prof.username || '';
   }
 
@@ -1049,6 +1172,7 @@
       emoji: f.emoji || '🙂',
       status_text: f.status_text || '',
       color: f.color || colorFor(f.user_id),
+      avatar_url: f.avatar_url || '',
       lat: f.lat == null ? null : Number(f.lat),
       lng: f.lng == null ? null : Number(f.lng),
       accuracy: f.accuracy == null ? null : Number(f.accuracy),
@@ -1085,12 +1209,14 @@
     if (state.feedReq) { state.feedQueued = true; return state.feedReq; }
     state.feedReq = (async () => {
       try {
+        const prevPeople = peopleSnapshot();
         const out = await API.rpc('friend_feed', selfArgs());
         if (!out) return;
         mergeFriends(out.friends);
         state.incoming = Array.isArray(out.incoming) ? out.incoming : [];
         state.outgoing = Array.isArray(out.outgoing) ? out.outgoing : [];
         markMyReadIfChatting();
+        checkFeedNotices(prevPeople);
         renderAll();
         syncRealtime();
         refreshGroups();
@@ -1109,6 +1235,268 @@
       }
     })();
     return state.feedReq;
+  }
+
+  /* ───────────────────────── 7-B. 알림 (채팅 · 온라인 · 이모지 콕) ─────────────────────────
+     · 인앱 배너는 항상, 브라우저 알림은 허용했을 때만, 소리·진동은 가능할 때만.
+     · 알림을 끈 사람(개인/그룹)의 소식은 배너도 브라우저 알림도 띄우지 않는다. */
+  let audioCtx = null;
+
+  function initAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) audioCtx = new AC();
+      }
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    } catch (e) { audioCtx = null; }
+  }
+
+  function beep(base) {
+    if (!audioCtx) return;
+    try {
+      const t = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(base || 720, t);
+      osc.frequency.exponentialRampToValueAtTime((base || 720) * 1.5, t + 0.13);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.085, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + 0.32);
+    } catch (e) {}
+  }
+
+  function buzz(ms) {
+    try { if (navigator.vibrate) navigator.vibrate(ms || 70); } catch (e) {}
+  }
+
+  function browserNotify(title, body, tag) {
+    try {
+      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+      const n = new Notification(title, {
+        body: body || '', tag: tag || '',
+        icon: './icons/icon-192.png', badge: './icons/icon-192.png',
+        silent: true,
+      });
+      n.onclick = () => { try { window.focus(); } catch (e) {} n.close(); };
+    } catch (e) { /* 안드로이드 크롬 등 생성자 미지원 */ }
+  }
+
+  function showNotice(o) {
+    if (!el.notice) return;
+    const key = o.tag || '';
+    if (key && state.lastNoticeKey === key && Date.now() - state.lastNoticeAt < 4000) return;
+    el.noticeIco.textContent = o.ico || '💬';
+    el.noticeTitle.textContent = o.title || '알림';
+    el.noticeText.textContent = o.text || '';
+    state.noticeOpen = o.open || null;
+    el.notice.hidden = false;
+    el.notice.classList.remove('is-in');
+    void el.notice.offsetWidth;
+    el.notice.classList.add('is-in');
+    clearTimeout(state.noticeTimer);
+    state.noticeTimer = setTimeout(hideNotice, NOTICE_MS);
+    state.lastNoticeKey = key;
+    state.lastNoticeAt = Date.now();
+  }
+
+  function hideNotice() {
+    if (!el.notice) return;
+    el.notice.hidden = true;
+    el.notice.classList.remove('is-in');
+    state.noticeOpen = null;
+  }
+
+  function notifyNew(o) {
+    if (!o || !o.id || isMuted(o.id)) return;
+    showNotice(o);
+    beep(o.ico === '🟢' ? 880 : 660);
+    buzz(o.ico === '🟢' ? 50 : 90);
+    browserNotify(o.title, o.text, o.tag);
+  }
+
+  function refreshNotifState() {
+    const perm = (typeof Notification === 'undefined') ? 'unsupported' : Notification.permission;
+    state.notifPerm = perm;
+    if (!el.mNotifState) return;
+    el.mNotifState.textContent = perm === 'granted' ? '켜져 있어요 — 새 채팅·친구 온라인을 알려드려요'
+      : perm === 'denied' ? '브라우저에서 알림이 막혀 있어요 — 설정에서 허용해 주세요'
+        : perm === 'unsupported' ? '이 브라우저는 알림을 지원하지 않아요 (앱 안 배너만)'
+          : '아직 꺼져 있어요 — 앱 안 배너로만 알려드려요';
+    if (el.mNotifAsk) el.mNotifAsk.hidden = perm !== 'default';
+  }
+
+  async function askNotifPermission() {
+    initAudio();
+    if (typeof Notification === 'undefined') {
+      toast('이 브라우저는 알림을 지원하지 않아요 — 앱 안 배너로 알려드릴게요', 2800);
+      return;
+    }
+    try {
+      const res = await Notification.requestPermission();
+      refreshNotifState();
+      if (res === 'granted') { beep(760); toast('알림을 켰어요 — 새 채팅과 친구 온라인을 알려드릴게요', 3000); }
+      else if (res === 'denied') toast('알림이 막혀 있어요 — 브라우저 설정에서 허용해 주세요', 3200);
+    } catch (e) { toast('알림을 켜지 못했어요', 2400); }
+  }
+
+  /* 새 채팅·온라인 전환 비교용 기준 */
+  function peopleSnapshot() {
+    const map = new Map();
+    for (const f of state.friends.values()) {
+      map.set(f.user_id, { online: f.lat != null && !isStale(f), unread: Number(f.unread || 0) });
+    }
+    return map;
+  }
+
+  function checkFeedNotices(prev) {
+    if (!prev) return;
+    const first = !state.friendBase;
+    state.friendBase = true;
+    if (first) return;
+
+    for (const f of state.friends.values()) {
+      const old = prev.get(f.user_id);
+      if (!old || isMuted(f.user_id)) continue;
+      const chatOpen = state.chatWith === f.user_id && !el.chatPanel.hidden;
+      const unread = Number(f.unread || 0);
+
+      if (unread > old.unread && !chatOpen) {
+        notifyNew({
+          id: f.user_id, ico: '💬',
+          title: f.nickname + ' 님의 새 메시지',
+          text: f.last_message || '새 메시지가 도착했어요',
+          tag: 'msg-' + f.user_id,
+          open: () => { if (!el.memberModal.hidden) closeModal(); openChat(f.user_id); },
+        });
+      }
+
+      const online = f.lat != null && !isStale(f);
+      const justNow = f.updated_at && Date.now() - new Date(f.updated_at).getTime() < 90 * 1000;
+      if (!old.online && online && justNow) {
+        const auto = autoStatusOf(f);
+        notifyNew({
+          id: f.user_id, ico: '🟢',
+          title: f.nickname + ' 님이 온라인이 되었어요',
+          text: f.status_text || (auto && auto.label) || '지금 위치를 공유하기 시작했어요',
+          tag: 'on-' + f.user_id,
+          open: () => openMember(f.user_id),
+        });
+      }
+    }
+  }
+
+  function groupSnapshot() {
+    const unread = new Map();
+    const online = new Map();
+    for (const [id, g] of state.groups) unread.set(id, Number(g.unread || 0));
+    for (const [id, p] of state.groupPeople) online.set(id, { online: p.lat != null && !isStale(p) });
+    return { unread, online };
+  }
+
+  function checkGroupNotices(prev) {
+    if (!prev) return;
+    const firstGroups = !state.groupBase;
+    const firstPeople = !state.groupPeopleBase;
+    state.groupBase = true;
+    state.groupPeopleBase = true;
+
+    if (!firstGroups) {
+      for (const g of state.groups.values()) {
+        const old = prev.unread.get(g.id);
+        if (old == null || isMuted(g.id)) continue;
+        const unread = Number(g.unread || 0);
+        const chatOpen = state.chatWith === g.id && !el.chatPanel.hidden;
+        if (unread > old && !chatOpen) {
+          const lm = g.last_message || {};
+          notifyNew({
+            id: g.id, ico: '👥',
+            title: g.name + ' 그룹 새 메시지',
+            text: lm.body ? nickOf(lm.sender_id) + ': ' + lm.body : '새 메시지가 도착했어요',
+            tag: 'grp-' + g.id,
+            open: () => { if (!el.memberModal.hidden) closeModal(); openGroupChat(g.id); },
+          });
+        }
+      }
+    }
+
+    if (!firstPeople) {
+      for (const p of state.groupPeople.values()) {
+        const old = prev.online.get(p.user_id);
+        if (!old || old.online || isMuted(p.user_id)) continue;
+        if (p.lat == null || isStale(p)) continue;
+        const auto = autoStatusOf(p);
+        notifyNew({
+          id: p.user_id, ico: '🟢',
+          title: p.nickname + ' 님이 온라인이 되었어요',
+          text: (p.groupName ? p.groupName + ' · ' : '') + (p.status_text || (auto && auto.label) || '위치를 공유하기 시작했어요'),
+          tag: 'on-' + p.user_id,
+          open: () => openMember(p.user_id),
+        });
+      }
+    }
+  }
+
+  /* ── 이모지 콕 ── */
+  function flyPoke(emoji, n) {
+    if (!el.pokeLayer) return;
+    const count = n || 4;
+    for (let i = 0; i < count; i++) {
+      const s = document.createElement('span');
+      s.className = 'poke-fly';
+      s.textContent = emoji || '👋';
+      s.style.left = (28 + Math.random() * 44) + '%';
+      s.style.animationDelay = (i * 95) + 'ms';
+      s.style.fontSize = (20 + Math.random() * 14) + 'px';
+      el.pokeLayer.appendChild(s);
+      setTimeout(() => { try { s.remove(); } catch (e) {} }, 2100 + i * 95);
+    }
+  }
+
+  async function sendPoke(toId, emoji) {
+    if (!toId || !state.me) return;
+    try {
+      await API.rpc('poke_send', Object.assign(selfArgs(), { p_to: toId, p_emoji: emoji }));
+      rt.send(pairTopic(toId), 'poke', { from: state.me.user_id, emoji });
+      flyPoke(emoji, 3);
+      beep(560);
+      toast(nickOf(toId) + ' 님에게 ' + emoji + ' 콕!', 1700);
+    } catch (e) {
+      const raw = String(e.detail || e.message || e);
+      if (/too_fast/.test(raw)) toast('조금 있다가 다시 콕 찔러 주세요', 1800);
+      else if (/not_allowed/.test(raw)) toast('친구이거나 같은 그룹일 때만 콕을 보낼 수 있어요', 2400);
+      else toast('콕을 보내지 못했어요 — ' + errText(e), 2800);
+    }
+  }
+
+  async function pollPokes() {
+    if (!state.me || !READY) return;
+    try {
+      const rows = await API.rpc('poke_poll', selfArgs());
+      if (!Array.isArray(rows) || !rows.length) return;
+      const fresh = rows.filter((p) => p && !state.pokeIds.has(String(p.id)));
+      if (!fresh.length) return;
+      const ids = [];
+      fresh.forEach((p) => {
+        state.pokeIds.add(String(p.id));
+        ids.push(Number(p.id));
+        flyPoke(p.emoji || '👋', 5);
+        beep(620);
+        buzz(60);
+        notifyNew({
+          id: p.from_id, ico: p.emoji || '👋',
+          title: (p.nickname || '친구') + ' 님이 ' + (p.emoji || '👋') + ' 보냈어요!',
+          text: '콕 찔렀어요 — 지도에서 확인해 보세요',
+          tag: 'poke-' + p.id,
+          open: () => openMember(p.from_id),
+        });
+      });
+      await API.rpc('poke_ack', Object.assign(selfArgs(), { p_ids: ids }));
+    } catch (e) { /* 콕은 조용히 */ }
   }
 
   /* ───────────────────────── 8. 렌더링: 상단 · 카드 · 요청 · 대화 ───────────────────────── */
@@ -1233,15 +1621,17 @@
 
   function memberCardHTML(p, isMe) {
     const stale = isStale(p);
-    const status = p.status_text || (isMe ? '상태를 남겨보세요' : '상태 없음');
+    const auto = autoStatusOf(p);
+    const status = p.status_text || (auto ? auto.label : (isMe ? '상태를 남겨보세요' : '상태 없음'));
     const batt = batteryText(p);
     const act = activityText(p);
     const unread = !isMe ? Number(p.unread || 0) : 0;
     const cls = ['member-card', isMe ? 'is-me' : '', state.selected === p.user_id ? 'is-selected' : ''].filter(Boolean).join(' ');
 
     return '<button class="' + cls + '" type="button" data-id="' + esc(p.user_id) + '">'
-      + '<span class="mc-avatar" style="--c:' + esc(p.color || colorFor(p.user_id)) + '">'
+      + '<span class="' + avatarClass('mc-avatar', p) + onlineCls(p) + '" style="' + avatarStyleOf(p) + '">'
       + esc(initialOf(p.nickname)) + '<span class="mc-emoji">' + esc(p.emoji || '🙂') + '</span>'
+      + onlineBadge(p)
       + (unread ? '<span class="mc-badge">' + (unread > 9 ? '9+' : unread) + '</span>' : '')
       + '</span>'
       + '<span class="mc-body">'
@@ -1251,7 +1641,7 @@
       + (act ? '<span class="mc-activity mc-activity--' + act.kind + '">' + esc(act.text) + '</span>' : '')
       + '<span class="mc-meta">'
       + '<span class="' + (stale ? 'mc-stale' : '') + '">'
-      + (isMe ? (p.lat ? '위치 공유 중' : '위치 대기') : (p.lat ? (stale ? '오프라인 · ' + timeAgo(p.updated_at) : timeAgo(p.updated_at)) : '위치 없음'))
+      + (p.hidden ? '위치 숨김 중' : (isMe ? (p.lat ? '위치 공유 중' : '위치 대기') : (p.lat ? (stale ? '오프라인 · ' + timeAgo(p.updated_at) : timeAgo(p.updated_at)) : '위치 없음')))
       + '</span>'
       + (batt ? '<span>' + esc(batt) + '</span>' : '')
       + '</span></span></button>';
@@ -1286,7 +1676,7 @@
     el.reqCount.textContent = state.incoming.length;
     setHTML(el.reqList, state.incoming.map((r) => (
       '<div class="req" data-req="' + esc(r.id) + '" data-uid="' + esc(r.user_id) + '">'
-      + '<span class="req-avatar" style="--c:' + esc(r.color || colorFor(r.user_id)) + '">' + esc(initialOf(r.nickname)) + '</span>'
+      + '<span class="' + avatarClass('req-avatar', r) + '" style="' + avatarStyleOf(r) + '">' + esc(initialOf(r.nickname)) + '</span>'
       + '<span class="req-body"><b>' + esc(r.nickname) + '</b><span>' + esc(timeAgo(r.created_at)) + ' · 친구 요청</span></span>'
       + '<span class="req-actions">'
       + '<button class="req-ok" type="button" data-accept="' + esc(r.id) + '">수락</button>'
@@ -1298,12 +1688,13 @@
   function convoRowHTML(f) {
     const unread = Number(f.unread || 0);
     const last = f.last_message ? ((f.last_from_me ? '나: ' : '') + f.last_message) : '아직 대화가 없어요';
+    const muted = isMuted(f.user_id);
     return '<button class="convo" type="button" data-chat="' + esc(f.user_id) + '">'
-      + '<span class="convo-avatar" style="--c:' + esc(f.color || colorFor(f.user_id)) + '">'
-      + esc(initialOf(f.nickname)) + '<span class="convo-emoji">' + esc(f.emoji || '🙂') + '</span></span>'
+      + '<span class="' + avatarClass('convo-avatar', f) + onlineCls(f) + '" style="' + avatarStyleOf(f) + '">'
+      + esc(initialOf(f.nickname)) + '<span class="convo-emoji">' + esc(f.emoji || '🙂') + '</span>' + onlineBadge(f) + '</span>'
       + '<span class="convo-body">'
       + '<span class="convo-top"><b>' + esc(f.nickname) + '</b>'
-      + '<span class="convo-time">' + esc(f.last_message_at ? msgTime(f.last_message_at) : '') + '</span></span>'
+      + '<span class="convo-time">' + (muted ? '🔕 ' : '') + esc(f.last_message_at ? msgTime(f.last_message_at) : '') + '</span></span>'
       + '<span class="convo-last' + (unread ? ' is-unread' : '') + '">' + esc(last) + '</span>'
       + '</span>'
       + (unread ? '<span class="convo-badge">' + (unread > 99 ? '99+' : unread) + '</span>' : '')
@@ -1324,13 +1715,17 @@
       const lastTxt = last
         ? ((last.sender_id === state.me.user_id ? '나: ' : nickOf(last.sender_id) + ': ') + last.body)
         : '아직 대화가 없어요';
+      const gunread = Number(g.unread || 0);
+      const gmuted = isMuted(g.id);
       return '<button class="convo" type="button" data-chat="' + esc(g.id) + '">'
         + '<span class="convo-avatar" style="--c:#0fb9a3">#<span class="convo-emoji">👥</span></span>'
         + '<span class="convo-body">'
         + '<span class="convo-top"><b>' + esc(g.name) + '</b>'
-        + '<span class="convo-time">' + esc(last ? msgTime(last.created_at) : '') + '</span></span>'
-        + '<span class="convo-last">' + esc(lastTxt) + '</span>'
-        + '</span></button>';
+        + '<span class="convo-time">' + (gmuted ? '🔕 ' : '') + esc(last ? msgTime(last.created_at) : '') + '</span></span>'
+        + '<span class="convo-last' + (gunread ? ' is-unread' : '') + '">' + esc(lastTxt) + '</span>'
+        + '</span>'
+        + (gunread ? '<span class="convo-badge">' + (gunread > 99 ? '99+' : gunread) + '</span>' : '')
+        + '</button>';
     }).join('');
 
     if (!list.length && !groupRows) {
@@ -1389,8 +1784,11 @@
 
   function pinSignature(m) {
     const act = activityText(m);
+    const auto = autoStatusOf(m);
     return [
       m.user_id, m.nickname, m.emoji, m.status_text, m.color,
+      avatarUrlOf(m) ? 'p' : '',
+      auto ? auto.label : '',
       isStale(m) ? 's' : '',
       state.selected === m.user_id ? 'sel' : '',
       state.me && m.user_id === state.me.user_id ? 'me' : '',
@@ -1408,7 +1806,8 @@
       state.selected === m.user_id ? 'is-selected' : '',
     ].filter(Boolean).join(' ');
 
-    const label = m.status_text || '';
+    const auto = autoStatusOf(m);
+    const label = m.status_text || (auto ? auto.label : '');
     const act = activityText(m);
     const batt = batteryText(m);
 
@@ -1420,8 +1819,8 @@
       : '';
 
     const html = '<div class="' + cls + '" style="--pin:' + esc(m.color || colorFor(m.user_id)) + '">'
-      + '<div class="pin-dot">' + esc(initialOf(m.nickname))
-      + '<span class="pin-emoji">' + esc(m.emoji || '🙂') + '</span></div>'
+      + '<div class="' + avatarClass('pin-dot', m) + onlineCls(m) + '" style="' + avatarStyleOf(m) + '">' + esc(initialOf(m.nickname))
+      + '<span class="pin-emoji">' + esc(m.emoji || '🙂') + '</span>' + onlineBadge(m) + '</div>'
       + '<div class="pin-tag"><span class="pin-name">' + esc(m.nickname)
       + (isMe ? '<em class="pin-me">나</em>' : '') + '</span>'
       + (label ? '<span class="pin-status">' + esc(label) + '</span>' : '')
@@ -1505,6 +1904,31 @@
   function centerOn(m) {
     if (!state.map || !m || !isFinite(m.lat) || !isFinite(m.lng)) return;
     state.map.flyTo([m.lat, m.lng], Math.max(state.map.getZoom(), 15), { duration: 0.7 });
+  }
+
+  /* 하단 시트·상세 시트가 가리는 만큼을 빼고, 친구 핀이 위쪽 지도 가운데에 오게 이동 */
+  function sheetCoverHeight() {
+    const vh = window.innerHeight || 844;
+    let h = 0;
+    if (el.sheet && !el.sheet.classList.contains('is-hidden') && !el.sheet.classList.contains('is-collapsed')) {
+      h = Math.max(h, el.sheet.getBoundingClientRect().height);
+    }
+    if (el.memberModal && !el.memberModal.hidden && el.mCard) {
+      h = Math.max(h, el.mCard.getBoundingClientRect().height);
+    }
+    return Math.min(Math.round(h), Math.round(vh * 0.62));
+  }
+
+  function focusPersonOnMap(m) {
+    if (!state.map || !m || m.hidden) return false;
+    if (m.lat == null || m.lng == null || !isFinite(m.lat) || !isFinite(m.lng)) return false;
+    if (state.routeView) return false;
+    const zoom = Math.max(state.map.getZoom() || 14, 16);
+    const offsetY = Math.round(sheetCoverHeight() / 2);   // 가려진 높이의 절반만큼 위로
+    const ll = L.latLng(Number(m.lat), Number(m.lng));
+    const target = state.map.unproject(state.map.project(ll, zoom).add([0, offsetY]), zoom);
+    state.map.flyTo(target, zoom, { duration: 0.75 });
+    return true;
   }
 
   /* ───────────────────────── 10. 이동 기록 · 동선 ───────────────────────── */
@@ -2293,12 +2717,13 @@
     state.selected = id;
     renderPins();
 
-    el.mAvatar.textContent = initialOf(m.nickname);
-    el.mAvatar.style.setProperty('--c', m.color || colorFor(m.user_id));
+    paintAvatar(el.mAvatar, m, initialOf(m.nickname));
     el.mName.textContent = m.nickname + (isMe ? ' (나)' : '');
-    el.mStatus.textContent = (m.emoji || '🙂') + ' ' + (m.status_text || '상태 없음');
+    el.mStatus.textContent = (m.emoji || '🙂') + ' ' + (m.status_text || (autoStatusOf(m) ? autoStatusOf(m).label : '상태 없음'));
 
     renderRows(m, isMe);
+    renderPokeBlock(m, isMe);
+    renderMuteRow(m, false);
 
     el.mChat.setAttribute('data-unread', String(isMe ? 0 : Number(m.unread || 0)));
     el.mCard.classList.toggle('is-me', isMe);
@@ -2322,9 +2747,12 @@
       el.mEmojis.innerHTML = EMOJIS.map((e) =>
         '<button class="emoji-btn' + ((state.me.emoji || '🙂') === e ? ' is-on' : '') + '" type="button" data-emoji="' + esc(e) + '">' + e + '</button>'
       ).join('');
+      paintAvatar(el.mPhotoPreview, state.me, initialOf(state.me.nickname));
+      refreshNotifState();
     }
 
     el.memberModal.hidden = false;
+    focusPersonOnMap(m);
 
     await ensureHistory(m);
     const fresh = personById(id) || m;
@@ -2339,6 +2767,25 @@
     state.selected = null;
     clearRoute();
     renderPins();
+  }
+
+  function renderPokeBlock(m, isMe) {
+    if (!el.mPokeBlock || !el.mPokeBtns) return;
+    el.mPokeBlock.hidden = !!isMe;
+    if (isMe) { el.mPokeBtns.innerHTML = ''; return; }
+    el.mPokeBtns.innerHTML = POKE_EMOJIS.map((e) =>
+      '<button class="poke-btn" type="button" data-poke="' + esc(e) + '" aria-label="' + esc(e) + ' 콕 보내기">' + e + '</button>'
+    ).join('');
+  }
+
+  function renderMuteRow(m, isMe) {
+    if (!el.mMuteRow || !el.mMute) return;
+    el.mMuteRow.hidden = !m || !!isMe;
+    if (!m || isMe) return;
+    const muted = isMuted(m.user_id);
+    el.mMute.textContent = muted ? '🔕 알림 끔' : '🔔 알림 켜짐';
+    el.mMute.classList.toggle('is-muted', muted);
+    el.mMute.setAttribute('aria-pressed', String(muted));
   }
 
   function renderBatteryBox(isMe) {
@@ -2363,8 +2810,7 @@
     state.chatWith = friendId;
     state.selected = friendId;
     el.chatPanel.hidden = false;
-    el.chatAvatar.textContent = initialOf(f.nickname);
-    el.chatAvatar.style.setProperty('--c', f.color || colorFor(friendId));
+    paintAvatar(el.chatAvatar, f, initialOf(f.nickname));
     el.chatName.textContent = f.nickname;
     renderChatSub();
     renderChatMessages();
@@ -2385,7 +2831,9 @@
     const f = state.chatWith ? state.friends.get(state.chatWith) : null;
     if (!f) return;
     const bits = [];
+    const auto = autoStatusOf(f);
     if (f.status_text) bits.push(f.status_text);
+    else if (auto) bits.push(auto.label);
     if (f.lat != null) {
       const since = staySinceOf(f);
       if (since) bits.push(stayChip(since) + ' 머무는 중');
@@ -2424,9 +2872,12 @@
       }
       const mine = state.me && msg.sender_id === state.me.user_id;
       const group = isGroupChat(id);
+      const left = (group && mine) ? Number(msg.unread || 0) : 0;
       html += '<div class="msg' + (mine ? ' msg--me' : '') + (group && !mine ? ' msg--group' : '') + '" data-msg="' + esc(msg.id) + '">'
         + (group && !mine ? '<span class="msg-who">' + esc(nickOf(msg.sender_id)) + '</span>' : '')
-        + '<span class="msg-bubble">' + esc(msg.body) + '</span>'
+        + (group && mine
+          ? '<span class="msg-line">' + (left > 0 ? '<span class="msg-unread" aria-label="안 읽은 ' + left + '명">' + left + '</span>' : '') + '<span class="msg-bubble">' + esc(msg.body) + '</span></span>'
+          : '<span class="msg-bubble">' + esc(msg.body) + '</span>')
         + '<span class="msg-time">' + esc(msgTime(msg.created_at)) + (mine ? (msg.read_at ? ' · 읽음' : '') : '') + '</span>'
         + '</div>';
     });
@@ -2505,6 +2956,7 @@
         await loadMessages(friendId, { full: false });
         const g = state.groups.get(friendId);
         if (g) g.last_message = { body, sender_id: state.me.user_id, created_at: new Date().toISOString() };
+        rt.send('grp-' + friendId, 'chat', { from: state.me.user_id, group: friendId });
         renderConvos();
         el.chatBody.scrollTop = el.chatBody.scrollHeight;
         return;
@@ -2536,6 +2988,8 @@
       emoji: mb.emoji || '🙂',
       status_text: mb.status_text || '',
       color: mb.color || colorFor(mb.user_id),
+      avatar_url: mb.avatar_url || '',
+      hidden: !!mb.hidden,
       lat: mb.lat == null ? null : Number(mb.lat),
       lng: mb.lng == null ? null : Number(mb.lng),
       accuracy: mb.accuracy == null ? null : Number(mb.accuracy),
@@ -2555,6 +3009,7 @@
   async function refreshGroups() {
     if (!state.me || !READY || !state.joined) return;
     try {
+      const prev = groupSnapshot();
       const rows = await API.rpc('group_feed', selfArgs());
       const list = Array.isArray(rows) ? rows : [];
       const groups = new Map();
@@ -2564,16 +3019,21 @@
         (g.members || []).forEach((mb) => {
           if (mb.user_id === state.me.user_id) return;
           if (state.friends.has(mb.user_id)) return;   // 친구는 친구 정보를 그대로
-          people.set(mb.user_id, normalizeGroupMember(mb, g));
+          const next = normalizeGroupMember(mb, g);
+          const kept = people.get(mb.user_id);
+          // 여러 그룹에 있으면 한 곳이라도 공개한 그룹의 위치를 쓴다
+          if (!kept || !next.hidden) people.set(mb.user_id, next);
         });
       });
       state.groups = groups;
       state.groupPeople = people;
+      checkGroupNotices(prev);
       renderGroups();
       renderList();
       renderPins();
       renderConvos();
       syncLiveRoutes();
+      syncRealtime();
     } catch (e) {
       console.warn('[우리끼리] groups', e);
     }
@@ -2581,11 +3041,17 @@
 
   function groupMemberChip(p) {
     const off = isStale(p);
+    const hidden = !!p.hidden;
     const since = p.stay_since || (p.lat != null ? staySinceOf(p) : null);
-    return '<button type="button" class="gc-mem' + (off ? ' is-off' : '') + '" data-gmem="' + esc(p.user_id) + '"'
-      + ' style="--c:' + esc(p.color || colorFor(p.user_id)) + '">'
-      + '<i>' + esc(p.emoji || initialOf(p.nickname)) + '</i>' + esc(p.nickname)
-      + (since ? '<em>⏱ ' + esc(stayChip(since)) + '</em>' : '')
+    const auto = hidden ? null : autoStatusOf(p);
+    const stay = hidden
+      ? '<em class="is-hidden">위치 숨김 중</em>'
+      : (auto ? '<em>' + esc(auto.ico + ' ' + auto.text.split(' · ')[0]) + '</em>'
+        : (since ? '<em>⏱ ' + esc(stayChip(since)) + '</em>' : ''));
+    return '<button type="button" class="gc-mem' + (off ? ' is-off' : '') + (hidden ? ' is-hidden' : '') + '" data-gmem="' + esc(p.user_id) + '">'
+      + '<i class="' + (hasPhoto(p) ? 'has-photo' : '') + onlineCls(p) + '" style="' + avatarStyleOf(p) + '">' + esc(p.emoji || initialOf(p.nickname))
+      + (isOnline(p) ? '<span class="on-dot"></span>' : '') + '</i>' + esc(p.nickname)
+      + stay
       + '</button>';
   }
 
@@ -2599,19 +3065,33 @@
       return;
     }
     const html = groups.map((g) => {
+      const meMb = (g.members || []).find((mb) => mb.user_id === state.me.user_id);
+      const hidden = !!(meMb && meMb.hidden);
+      const gunread = Number(g.unread || 0);
+      const gmuted = isMuted(g.id);
       const chips = (g.members || [])
         .filter((mb) => mb.user_id !== state.me.user_id)
-        .map((mb) => groupMemberChip(state.friends.get(mb.user_id) || state.groupPeople.get(mb.user_id) || normalizeGroupMember(mb, g)))
+        .map((mb) => groupMemberChip(Object.assign(
+          {},
+          state.friends.get(mb.user_id) || state.groupPeople.get(mb.user_id) || normalizeGroupMember(mb, g),
+          { hidden: !!mb.hidden, groupId: g.id, groupName: g.name }
+        )))
         .join('');
       return '<div class="group-card' + (state.viewGroup === g.id ? ' is-on' : '') + '" data-group="' + esc(g.id) + '">'
         + '<div class="gc-head"><span class="gc-name">' + esc(g.name) + '</span>'
+        + (gunread ? '<span class="gc-unread">' + (gunread > 9 ? '9+' : gunread) + '</span>' : '')
         + '<span class="gc-count">' + (g.member_count || (g.members || []).length) + '명</span></div>'
         + '<div class="gc-code"><span>초대 코드</span><b>' + esc(g.invite_code) + '</b>'
         + '<button type="button" class="gc-mini" data-gcopy="' + esc(g.invite_code) + '">코드 복사</button>'
         + '<button type="button" class="gc-mini" data-glink="' + esc(g.invite_code) + '">링크 복사</button></div>'
         + '<div class="gc-members">' + (chips || '<span class="gc-nobody">아직 나뿐이에요 — 초대 코드를 보내 보세요.</span>') + '</div>'
+        + '<div class="gc-hide"><span>내 위치</span>'
+        + '<button type="button" class="gc-switch' + (hidden ? ' is-off' : '') + '" data-ghide="' + esc(g.id) + '" aria-pressed="' + String(!hidden) + '">'
+        + (hidden ? '숨김' : '공개') + '</button>'
+        + '<span>' + (hidden ? '이 그룹에는 내 위치·동선이 보이지 않아요' : '이 그룹에 내 위치·동선을 공유해요') + '</span></div>'
         + '<div class="gc-acts">'
         + '<button type="button" class="btn btn--primary" data-gchat="' + esc(g.id) + '">단체 채팅</button>'
+        + '<button type="button" class="btn btn--ghost gc-mute" data-gmute="' + esc(g.id) + '" title="그룹 알림" aria-pressed="' + String(gmuted) + '">' + (gmuted ? '🔕' : '🔔') + '</button>'
         + '<button type="button" class="btn btn--ghost" data-gleave="' + esc(g.id) + '">나가기</button>'
         + '</div></div>';
     }).join('');
@@ -2701,6 +3181,39 @@
     }
   }
 
+  async function toggleGroupHide(gid) {
+    const g = state.groups.get(gid);
+    if (!g || !state.me) return;
+    const me = (g.members || []).find((mb) => mb.user_id === state.me.user_id);
+    const next = !(me && me.hidden);
+    try {
+      const out = await API.rpc('group_toggle_hide', Object.assign(selfArgs(), { p_group: gid, p_hide: next }));
+      await refreshGroups();
+      const hid = out ? !!out.hidden : next;
+      toast(hid
+        ? '이 그룹에서는 내 위치를 잠깐 숨겼어요 — 채팅은 그대로 돼요'
+        : '이 그룹에 내 위치를 다시 공개했어요', 3000);
+    } catch (e) {
+      toast('위치 공개 설정을 바꾸지 못했어요 — ' + errText(e), 3000);
+    }
+  }
+
+  async function markGroupRead(gid) {
+    if (!state.me || !gid) return;
+    const now = Date.now();
+    state.groupReadSentAt = state.groupReadSentAt || {};
+    if (state.groupReadSentAt[gid] && now - state.groupReadSentAt[gid] < 4000) return;
+    state.groupReadSentAt[gid] = now;
+    try {
+      await API.rpc('group_mark_read', Object.assign(selfArgs(), { p_group: gid }));
+      const g = state.groups.get(gid);
+      if (g) g.unread = 0;
+      rt.send('grp-' + gid, 'read', { from: state.me.user_id, group: gid });
+      renderConvos();
+      updateChrome();
+    } catch (e) { /* 다음 피드에서 다시 */ }
+  }
+
   async function leaveGroup(gid) {
     const g = state.groups.get(gid);
     if (!g) return;
@@ -2728,6 +3241,7 @@
     renderChatMessages();
     el.chatBody.scrollTop = el.chatBody.scrollHeight;
     loadMessages(gid, { full: true }).then(() => {
+      markGroupRead(gid);
       el.chatInput.focus();
       el.chatBody.scrollTop = el.chatBody.scrollHeight;
     });
@@ -3306,6 +3820,69 @@
     }
   }
 
+  /* ── 프로필 사진: 정사각 가운데 자르기 + 180×180 JPEG 압축 ── */
+  function readImageFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('bad_image'));
+        img.src = reader.result;
+      };
+      reader.onerror = () => reject(new Error('read_failed'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handlePhotoFile(file) {
+    if (!state.me || !file) return;
+    if (!/^image\//.test(file.type || '')) { toast('사진 파일을 골라 주세요', 2200); return; }
+    if (file.size > 15 * 1024 * 1024) { toast('15MB 이하 사진으로 골라 주세요', 2600); return; }
+    toast('사진을 준비하는 중…', 1400);
+    try {
+      const img = await readImageFile(file);
+      const w = img.naturalWidth || img.width;
+      const h = img.naturalHeight || img.height;
+      const side = Math.min(w, h);
+      if (!side) throw new Error('bad_image');
+      const canvas = document.createElement('canvas');
+      canvas.width = 180;
+      canvas.height = 180;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, 180, 180);
+      ctx.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, 180, 180);
+      let url = canvas.toDataURL('image/jpeg', 0.82);
+      if (url.length > 42000) url = canvas.toDataURL('image/jpeg', 0.7);
+      if (url.length > 70000) url = canvas.toDataURL('image/jpeg', 0.55);
+
+      paintAvatar(el.mPhotoPreview, Object.assign({}, state.me, { avatar_url: url }), initialOf(state.me.nickname));
+      const prof = await API.rpc('friend_set_avatar', Object.assign(selfArgs(), { p_avatar: url }));
+      applyProfile(prof);
+      saveMe();
+      renderAll();
+      paintAvatar(el.mPhotoPreview, state.me, initialOf(state.me.nickname));
+      toast('프로필 사진을 바꿨어요', 1900);
+    } catch (e) {
+      toast('사진을 올리지 못했어요 — ' + errText(e), 3200);
+    }
+  }
+
+  async function clearMyPhoto() {
+    if (!state.me) return;
+    try {
+      const prof = await API.rpc('friend_set_avatar', Object.assign(selfArgs(), { p_avatar: '' }));
+      applyProfile(prof);
+      saveMe();
+      renderAll();
+      paintAvatar(el.mPhotoPreview, state.me, initialOf(state.me.nickname));
+      toast('프로필 사진을 지웠어요', 1800);
+    } catch (e) {
+      toast('사진을 지우지 못했어요 — ' + errText(e), 3000);
+    }
+  }
+
   async function setBatteryMode(mode) {
     if (!state.me) return;
     state.battMode = mode;
@@ -3390,6 +3967,19 @@
         scheduleFeedRefresh(200);
       } else if (event === 'req') {
         scheduleFeedRefresh(300);
+      } else if (event === 'poke') {
+        pollPokes();
+      } else if (event === 'chat') {
+        const gid = (payload && payload.group) || topic.replace(/^grp-/, '');
+        if (gid && state.chatWith === gid && !el.chatPanel.hidden) {
+          loadMessages(gid, { full: true }).then(() => markGroupRead(gid));
+        }
+        scheduleFeedRefresh(200);
+      } else if (event === 'read') {
+        const gid = (payload && payload.group) || topic.replace(/^grp-/, '');
+        if (gid && state.chatWith === gid && !el.chatPanel.hidden) {
+          loadMessages(gid, { full: true });
+        }
       }
     }
 
@@ -3480,6 +4070,7 @@
     if (!state.me) return;
     const topics = ['friend-' + state.me.user_id];
     for (const id of state.friends.keys()) topics.push(pairTopic(id));
+    for (const id of state.groups.keys()) topics.push('grp-' + id);
     rt.setTopics(topics);
   }
 
@@ -3501,13 +4092,15 @@
       else if (Date.now() - state.lastPublish > REFRESH_MS * 0.9) publishMe(false);
     }
     await refreshFeed();
+    pollPokes();
     renderTimes();
     if (state.routeView) refreshRouteView();
     const opened = modalUser && !el.memberModal.hidden ? personById(modalUser) : null;
     if (opened) renderRouteBlock(opened);
     if (state.chatWith && !el.chatPanel.hidden) {
       renderChatSub();
-      loadMessages(state.chatWith, { full: false });
+      loadMessages(state.chatWith, { full: isGroupChat(state.chatWith) });
+      if (isGroupChat(state.chatWith)) markGroupRead(state.chatWith);
     }
   }
 
@@ -3529,6 +4122,8 @@
     await refreshFeed();
     await loadHistoryAll();
     renderAll();
+    refreshNotifState();
+    pollPokes();
 
     readBattery();
     if (state.auto) startWatch();
@@ -3865,6 +4460,29 @@
     });
 
     el.mSave.addEventListener('click', saveMyProfile);
+    if (el.mPokeBtns) el.mPokeBtns.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-poke]');
+      if (!btn || !modalUser) return;
+      sendPoke(modalUser, btn.getAttribute('data-poke'));
+    });
+    if (el.mMute) el.mMute.addEventListener('click', () => {
+      if (!modalUser) return;
+      setMuted(modalUser, !isMuted(modalUser));
+    });
+    if (el.mPhotoPick) el.mPhotoPick.addEventListener('click', () => { try { el.mPhotoInput.click(); } catch (e) {} });
+    if (el.mPhotoInput) el.mPhotoInput.addEventListener('change', () => {
+      const file = el.mPhotoInput.files && el.mPhotoInput.files[0];
+      handlePhotoFile(file);
+      el.mPhotoInput.value = '';
+    });
+    if (el.mPhotoClear) el.mPhotoClear.addEventListener('click', clearMyPhoto);
+    if (el.mNotifAsk) el.mNotifAsk.addEventListener('click', askNotifPermission);
+    if (el.noticeClose) el.noticeClose.addEventListener('click', (e) => { e.stopPropagation(); hideNotice(); });
+    if (el.notice) el.notice.addEventListener('click', () => {
+      const open = state.noticeOpen;
+      hideNotice();
+      if (typeof open === 'function') open();
+    });
     el.mChat.addEventListener('click', () => {
       const id = modalUser;
       closeModal();
@@ -3938,6 +4556,10 @@
         if (leave) { leaveGroup(leave.getAttribute('data-gleave')); return; }
         const mem = e.target.closest('[data-gmem]');
         if (mem) { const p = personById(mem.getAttribute('data-gmem')); if (p) openMember(p.user_id); return; }
+        const ghide = e.target.closest('[data-ghide]');
+        if (ghide) { toggleGroupHide(ghide.getAttribute('data-ghide')); return; }
+        const gmute = e.target.closest('[data-gmute]');
+        if (gmute) { const gid = gmute.getAttribute('data-gmute'); setMuted(gid, !isMuted(gid)); renderGroups(); return; }
         const cp = e.target.closest('[data-gcopy]');
         if (cp) { copyText(cp.getAttribute('data-gcopy'), '그룹 초대 코드를 복사했어요'); return; }
         const lk = e.target.closest('[data-glink]');
@@ -3976,6 +4598,7 @@
       if (state.map) state.map.invalidateSize();
       renderTimes();
       refreshFeed();
+      pollPokes();
       if (state.auto) askLocation({ silent: true });
     });
 
@@ -4022,6 +4645,9 @@
     }
 
     bindEvents();
+    ['pointerdown', 'keydown', 'touchstart'].forEach((ev) => {
+      document.addEventListener(ev, initAudio, { once: true, passive: true });
+    });
     updateSheetHeight();
     readBattery();
     loadPlaceCache();
@@ -4121,6 +4747,7 @@
     place: (lat, lng) => new Promise((resolve) => placeSoon(lat, lng, resolve)),
     places: () => Array.from(state.places.entries()),
     fit: () => fitToPeople(false),
+    reloadChat: () => (state.chatWith ? loadMessages(state.chatWith, { full: true }) : Promise.resolve([])),
     dump: () => ({
       me: state.me ? { ...state.me } : null,
       friends: Array.from(state.friends.values()),

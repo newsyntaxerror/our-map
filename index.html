@@ -24,7 +24,7 @@
 <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <link rel="stylesheet" href="./vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="./styles.css?v=18">
+<link rel="stylesheet" href="./styles.css?v=19">
 <script>
   /* 화면 확인용: 콘솔 에러를 남겨 두면 개발자도구 없이도 읽을 수 있습니다. */
   window.__ERRORS__ = [];
@@ -233,6 +233,14 @@
     <span class="sheet-open-badge" id="sheetOpenBadge" hidden>0</span>
   </button>
 
+  <div class="notice" id="notice" hidden role="status" aria-live="polite">
+    <span class="notice-ico" id="noticeIco">💬</span>
+    <span class="notice-body"><b id="noticeTitle"></b><span id="noticeText"></span></span>
+    <button class="notice-x" id="noticeClose" type="button" aria-label="닫기">✕</button>
+  </div>
+
+  <div class="poke-layer" id="pokeLayer" aria-hidden="true"></div>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <!-- 사람 상세 · 동선 -->
@@ -246,6 +254,11 @@
           <h3 id="mName">—</h3>
           <p id="mStatus">—</p>
         </div>
+      </div>
+
+      <div class="poke-block" id="mPokeBlock" hidden>
+        <span class="field-label">이모지 콕 <em>핀 대신 살짝 콕 찔러 보세요</em></span>
+        <div class="poke-btns" id="mPokeBtns"></div>
       </div>
 
       <section class="route-block" id="mRouteBlock">
@@ -276,6 +289,14 @@
           </div>
         </div>
 
+        <span class="field-label">프로필 사진</span>
+        <div class="photo-row">
+          <span class="modal-avatar modal-avatar--edit" id="mPhotoPreview">?</span>
+          <button class="btn btn--ghost btn--photo" id="mPhotoPick" type="button">사진 선택</button>
+          <button class="btn btn--ghost" id="mPhotoClear" type="button">기본으로</button>
+          <input id="mPhotoInput" class="photo-input" type="file" accept="image/*" hidden>
+        </div>
+
         <span class="field-label">내 닉네임</span>
         <input class="field-input" id="mNickInput" type="text" maxlength="12" placeholder="닉네임">
 
@@ -284,6 +305,12 @@
         <input class="field-input" id="mStatusInput" type="text" maxlength="24" placeholder="한 줄 상태 (예: 퇴근길이에요)">
 
         <button class="btn btn--ghost" id="mCopyCode" type="button">내 친구 코드 복사</button>
+
+        <span class="field-label">알림 <em>새 채팅 · 친구 온라인</em></span>
+        <div class="notif-line">
+          <span class="notif-state" id="mNotifState">—</span>
+          <button class="btn btn--ghost" id="mNotifAsk" type="button">알림 켜기</button>
+        </div>
 
         <div class="batt-edit" id="mBatt" hidden>
           <span class="field-label">배터리 표시 <em>이 브라우저는 배터리 정보를 막고 있어요</em></span>
@@ -302,6 +329,11 @@
       </div>
 
       <button class="link-danger" id="mRemove" type="button" hidden>친구 끊기</button>
+
+      <div class="mute-row" id="mMuteRow" hidden>
+        <button class="btn btn--ghost mute-toggle" id="mMute" type="button">🔔 알림 켜짐</button>
+        <span class="mute-hint">이 사람의 새 채팅·온라인 알림</span>
+      </div>
 
       <div class="modal-actions" id="mActions">
         <button class="btn btn--ghost" id="mClose" type="button">닫기</button>
@@ -465,7 +497,7 @@
 </main>
 
 <script src="./vendor/leaflet/leaflet.js"></script>
-<script src="./config.js?v=18"></script>
-<script src="./app.js?v=18"></script>
+<script src="./config.js?v=19"></script>
+<script src="./app.js?v=19"></script>
 </body>
 </html>
