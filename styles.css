@@ -2545,3 +2545,25 @@ svg { display: block; }
   border: 1.5px solid #fff;
   box-shadow: 0 0 6px rgba(34, 197, 94, .5);
 }
+
+/* 버전 표시 */
+.app-ver {
+  margin: 14px 0 2px;
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted-2);
+  letter-spacing: -.01em;
+}
+.app-ver b { color: var(--muted); font-weight: 800; }
+.app-ver--join { margin: 10px 0 0; font-size: 10px; }
+
+.gc-scope {
+  flex: none;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 2px 7px;
+}

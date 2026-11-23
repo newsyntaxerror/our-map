@@ -24,7 +24,7 @@
 <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <link rel="stylesheet" href="./vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="./styles.css?v=19">
+<link rel="stylesheet" href="./styles.css?v=20">
 <script>
   /* 화면 확인용: 콘솔 에러를 남겨 두면 개발자도구 없이도 읽을 수 있습니다. */
   window.__ERRORS__ = [];
@@ -120,6 +120,7 @@
     </p>
 
     <p class="install-note">아이폰은 사파리 <b>공유 → 홈 화면에 추가</b>로 앱처럼 쓸 수 있어요.</p>
+    <p class="app-ver app-ver--join">우리끼리 <b id="appVerJoin">v20</b></p>
   </div>
 </div>
 
@@ -312,6 +313,8 @@
           <button class="btn btn--ghost" id="mNotifAsk" type="button">알림 켜기</button>
         </div>
 
+        <p class="app-ver">우리끼리 <b id="appVer">v20</b> · 수정할 때마다 버전이 올라가요</p>
+
         <div class="batt-edit" id="mBatt" hidden>
           <span class="field-label">배터리 표시 <em>이 브라우저는 배터리 정보를 막고 있어요</em></span>
           <div class="seg" id="mBattModes">
@@ -497,7 +500,7 @@
 </main>
 
 <script src="./vendor/leaflet/leaflet.js"></script>
-<script src="./config.js?v=19"></script>
-<script src="./app.js?v=19"></script>
+<script src="./config.js?v=20"></script>
+<script src="./app.js?v=20"></script>
 </body>
 </html>

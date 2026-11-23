@@ -22,6 +22,7 @@
   const REFRESH_MS = Math.max(5, Number(CFG.REFRESH_SECONDS) || 10) * 1000;
   const STALE_MS = 10 * 60 * 1000;                          // 10분 넘게 갱신 없으면 '오프라인'
   const PALETTE = ['#0fb9a3', '#f59e0b', '#6366f1', '#ec4899', '#8b5cf6', '#0ea5e9', '#ef4444', '#14b8a6'];
+  const APP_VERSION = 'v20';
   const EMOJIS = ['🙂', '🙌', '🏃', '🚇', '💼', '🏠', '🍜', '😴'];
   const POKE_EMOJIS = ['👋', '❤️', '☕', '📍', '😆'];
   const AUTO_STATUS_MIN_MS = 5 * 60 * 1000;    // 5분 이상 머문 곳은 자동 상태로
@@ -466,7 +467,7 @@
     'mRouteBlock', 'mRouteSum', 'mRouteHint', 'mRouteOpen',
     'mPokeBlock', 'mPokeBtns', 'mMuteRow', 'mMute',
     'mPhotoInput', 'mPhotoPreview', 'mPhotoPick', 'mPhotoClear',
-    'mNotifState', 'mNotifAsk',
+    'mNotifState', 'mNotifAsk', 'appVer', 'appVerJoin',
     'notice', 'noticeIco', 'noticeTitle', 'noticeText', 'noticeClose', 'pokeLayer',
     'routeView', 'rvBack', 'rvClose', 'rvWho', 'rvMeta', 'rvTlToggle', 'rvTlLabel',
     'rvTimeline', 'rvTlCount', 'rvTlHide', 'rvTlList',
@@ -535,6 +536,8 @@
     viewGroup: null,        // 지도에서 보고 있는 그룹
     groupMode: 'create',    // 그룹 모달 모드
     addGroupCode: '',       // 초대 링크(?group=)로 받은 코드
+    mapScope: 'friends',    // 지도에 누구를 보여줄지: friends | groups
+    groupReadSentAt: {},
     muted: LS.get(MUTE_KEY, null) || {},   // user_id / group_id → 알림 끔
     friendBase: false,      // 첫 피드는 알림 기준만 잡는다
     groupBase: false,
@@ -869,6 +872,42 @@
     for (const f of state.friends.values()) arr.push(f);
     for (const g of state.groupPeople.values()) arr.push(g);
     return arr;
+  }
+
+  /* 지도에 그릴 사람: 친구 탭 = 나 + 1:1 친구만, 그룹 탭 = 나 + 고른 그룹 멤버만.
+     채팅 탭에서는 마지막으로 보고 있던 지도(친구/그룹)를 그대로 유지합니다. */
+  function activeGroup() {
+    if (!state.groups.size) return null;
+    if (state.viewGroup && state.groups.has(state.viewGroup)) return state.groups.get(state.viewGroup);
+    return state.groups.values().next().value || null;
+  }
+
+  function visiblePeople() {
+    const out = [];
+    if (state.me) out.push(state.me);
+
+    if (state.mapScope === 'groups') {
+      const g = activeGroup();
+      if (!g) return out;
+      const seen = new Set([state.me.user_id]);
+      (g.members || []).forEach((mb) => {
+        if (!mb || !mb.user_id || seen.has(mb.user_id)) return;
+        seen.add(mb.user_id);
+        const base = personById(mb.user_id) || normalizeGroupMember(mb, g);
+        const hidden = !!mb.hidden;
+        out.push(Object.assign({}, base, {
+          hidden,
+          lat: hidden ? null : (base.lat != null ? base.lat : mb.lat),
+          lng: hidden ? null : (base.lng != null ? base.lng : mb.lng),
+          stay_since: hidden ? null : base.stay_since,
+          updated_at: hidden ? null : base.updated_at,
+        }));
+      });
+      return out;
+    }
+
+    for (const f of state.friends.values()) out.push(f);
+    return out;
   }
 
   function isGroupChat(id) {
@@ -1843,7 +1882,7 @@
       return;
     }
 
-    for (const m of allPeople()) {
+    for (const m of visiblePeople()) {
       if (!isFinite(m.lat) || !isFinite(m.lng) || m.lat == null) continue;
       seen.add(m.user_id);
 
@@ -1880,7 +1919,7 @@
 
   function fitToPeople(animate = false) {
     if (!state.map) return;
-    const pts = allPeople()
+    const pts = visiblePeople()
       .filter((m) => isFinite(m.lat) && isFinite(m.lng) && m.lat != null)
       .map((m) => [m.lat, m.lng]);
     if (!pts.length) return;
@@ -2617,7 +2656,7 @@
     if (!state.map) return;
     const keep = new Set();
 
-    for (const m of allPeople()) {
+    for (const m of visiblePeople()) {
       if (m.user_id === state.routeFor) continue;
 
       const pts = historyFor(m.user_id).filter((p) => p.t > Date.now() - LIVE_TRAIL_MS);
@@ -3026,6 +3065,9 @@
         });
       });
       state.groups = groups;
+      if (!state.viewGroup || !groups.has(state.viewGroup)) {
+        state.viewGroup = groups.size ? groups.keys().next().value : null;
+      }
       state.groupPeople = people;
       checkGroupNotices(prev);
       renderGroups();
@@ -3077,8 +3119,9 @@
           { hidden: !!mb.hidden, groupId: g.id, groupName: g.name }
         )))
         .join('');
-      return '<div class="group-card' + (state.viewGroup === g.id ? ' is-on' : '') + '" data-group="' + esc(g.id) + '">'
+      return '<div class="group-card' + (state.mapScope === 'groups' && state.viewGroup === g.id ? ' is-on' : '') + '" data-group="' + esc(g.id) + '">'
         + '<div class="gc-head"><span class="gc-name">' + esc(g.name) + '</span>'
+        + (state.mapScope === 'groups' && state.viewGroup === g.id ? '<span class="gc-scope">지도 표시 중</span>' : '')
         + (gunread ? '<span class="gc-unread">' + (gunread > 9 ? '9+' : gunread) + '</span>' : '')
         + '<span class="gc-count">' + (g.member_count || (g.members || []).length) + '명</span></div>'
         + '<div class="gc-code"><span>초대 코드</span><b>' + esc(g.invite_code) + '</b>'
@@ -3377,6 +3420,8 @@
 
   function setTab(tab) {
     state.tab = tab === 'chat' ? 'chat' : (tab === 'groups' ? 'groups' : 'friends');
+    if (state.tab === 'friends') state.mapScope = 'friends';
+    if (state.tab === 'groups') state.mapScope = 'groups';
     el.tabFriends.classList.toggle('is-on', state.tab === 'friends');
     if (el.tabGroups) el.tabGroups.classList.toggle('is-on', state.tab === 'groups');
     el.tabChat.classList.toggle('is-on', state.tab === 'chat');
@@ -3387,6 +3432,11 @@
     setTimeout(updateSheetHeight, 30);
     if (state.tab === 'chat') renderConvos();
     if (state.tab === 'groups') { renderGroups(); refreshGroups(); }
+    if (state.joined && (state.tab === 'friends' || state.tab === 'groups')) {
+      renderPins();
+      syncLiveRoutes();
+      setTimeout(() => fitToPeople(true), 80);
+    }
   }
 
   /* ───────────────────────── 15. 이동 기록 채우기 ───────────────────────── */
@@ -4572,6 +4622,10 @@
         if (card) {
           const gid = card.getAttribute('data-group');
           state.viewGroup = gid;
+          state.mapScope = 'groups';
+          renderGroups();
+          renderPins();
+          syncLiveRoutes();
           focusGroup(state.groups.get(gid));
         }
       });
@@ -4645,6 +4699,8 @@
     }
 
     bindEvents();
+    if (el.appVer) el.appVer.textContent = APP_VERSION;
+    if (el.appVerJoin) el.appVerJoin.textContent = APP_VERSION;
     ['pointerdown', 'keydown', 'touchstart'].forEach((ev) => {
       document.addEventListener(ev, initAudio, { once: true, passive: true });
     });
