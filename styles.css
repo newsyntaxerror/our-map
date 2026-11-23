@@ -2488,21 +2488,28 @@ svg { display: block; }
 .gc-mute { flex: 0 0 auto; }
 .gc-acts .gc-mute { flex: 0 0 44px; padding: 0 6px; font-size: 14px; }
 
-/* 그룹 채팅: 내 말풍선 옆 안 읽은 사람 수 (카카오톡처럼) */
+/* 그룹·1:1 채팅: 내 말풍선 옆 안 읽은 사람 수 (카카오톡처럼 노란 숫자) */
 .msg-line { display: flex; align-items: flex-end; gap: 5px; max-width: 100%; }
 .msg-line .msg-bubble { min-width: 0; }
 .msg-unread {
   flex: none;
-  font-size: 10.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 11.5px;
   font-weight: 800;
-  line-height: 1.6;
-  color: #a16207;
-  background: #fff3d1;
-  border-radius: 8px;
-  padding: 0 4px;
-  margin-bottom: 2px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, .06);
+  line-height: 1;
+  letter-spacing: -.02em;
+  color: #3c1e1e;
+  background: #fee500;
+  border-radius: 9px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, .18);
+  margin-bottom: 1px;
 }
+.msg--me .msg-unread { margin-right: 1px; }
 
 /* ───────────── 온라인 표시: 초록 링 + ON 배지 ───────────── */
 @keyframes on-glow {

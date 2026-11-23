@@ -22,12 +22,17 @@
   const REFRESH_MS = Math.max(5, Number(CFG.REFRESH_SECONDS) || 10) * 1000;
   const STALE_MS = 10 * 60 * 1000;                          // 10분 넘게 갱신 없으면 '오프라인'
   const PALETTE = ['#0fb9a3', '#f59e0b', '#6366f1', '#ec4899', '#8b5cf6', '#0ea5e9', '#ef4444', '#14b8a6'];
-  const APP_VERSION = 'v20';
+  const APP_VERSION = 'v21';
   const EMOJIS = ['🙂', '🙌', '🏃', '🚇', '💼', '🏠', '🍜', '😴'];
   const POKE_EMOJIS = ['👋', '❤️', '☕', '📍', '😆'];
   const AUTO_STATUS_MIN_MS = 5 * 60 * 1000;    // 5분 이상 머문 곳은 자동 상태로
   const MUTE_KEY = 'urikkiri.muted.v1';        // 개인/그룹별 알림 끄기
   const NOTICE_MS = 5600;
+  /* ── 근처 알림(카톡 '근처에 있어요') ── */
+  const NEAR_M = 300;                       // 이 거리 안으로 들어오면 '근처'
+  const NEAR_EXIT_M = 500;                  // 이만큼 벗어나야 다시 '밖'으로 친다(재알림 조건)
+  const NEAR_COOLDOWN_MS = 30 * 60 * 1000;  // 같은 사람 알림은 30분에 한 번
+  const NEAR_KEY = 'urikkiri.nearby.v1';    // { user_id: { at: 알림시각, inside: 근처인지 } }
 
   /* 배터리 API는 안드로이드 크롬 등에서만 열려 있어요(iOS 사파리는 막혀 있음). */
   const BATT_API = typeof navigator !== 'undefined' && typeof navigator.getBattery === 'function';
@@ -539,6 +544,8 @@
     mapScope: 'friends',    // 지도에 누구를 보여줄지: friends | groups
     groupReadSentAt: {},
     muted: LS.get(MUTE_KEY, null) || {},   // user_id / group_id → 알림 끔
+    nearby: LS.get(NEAR_KEY, null) || {},   // user_id → { at, inside } 근처 알림 상태(30분 쿨다운·500m 이탈 시 재발동)
+    lastNearby: null,                       // 마지막 근처 알림(검증·디버그용)
     friendBase: false,      // 첫 피드는 알림 기준만 잡는다
     groupBase: false,
     groupPeopleBase: false,
@@ -1255,6 +1262,7 @@
         state.incoming = Array.isArray(out.incoming) ? out.incoming : [];
         state.outgoing = Array.isArray(out.outgoing) ? out.outgoing : [];
         markMyReadIfChatting();
+        checkNearby();
         checkFeedNotices(prevPeople);
         renderAll();
         syncRealtime();
@@ -1477,6 +1485,98 @@
           open: () => openMember(p.user_id),
         });
       }
+    }
+  }
+
+  /* ── 근처 알림: 친구·그룹 멤버가 300m 안으로 들어오면 알린다 ──
+     · 같은 사람에게는 30분에 한 번, 500m 넘게 벗어났다가 다시 들어오면 재발동
+     · 알림을 끈 사람(개인별)에서 오는 근처 알림은 띄우지 않는다
+     · 그룹으로만 아는 사람은 그 사람이 보이는 그룹이 모두 '알림 끔'이면 띄우지 않는다 */
+  function nearbyCandidates() {
+    const out = new Map();
+    for (const f of state.friends.values()) out.set(f.user_id, f);
+    for (const [id, p] of state.groupPeople) if (!out.has(id)) out.set(id, p);
+    return out;
+  }
+
+  function isNearbyMuted(id) {
+    if (isMuted(id)) return true;
+    if (state.friends.has(id)) return false;
+    const gids = [];
+    for (const g of state.groups.values()) {
+      if ((g.members || []).some((mb) => mb.user_id === id)) gids.push(g.id);
+    }
+    return gids.length > 0 && gids.every((gid) => isMuted(gid));
+  }
+
+  function nearbyGroupOf(id) {
+    for (const g of state.groups.values()) {
+      if ((g.members || []).some((mb) => mb.user_id === id)) return g;
+    }
+    return null;
+  }
+
+  function notifyNearby(p, dist) {
+    const m = Math.max(10, Math.round(dist / 10) * 10);
+    const auto = autoStatusOf(p);
+    const g = nearbyGroupOf(p.user_id);
+    const where = p.status_text || (auto && auto.label) || (g ? g.name + ' · 가까이 있어요' : '가까이 있어요');
+    const title = '📍 ' + p.nickname + ' 님이 근처(약 ' + m + 'm)에 있어요!';
+    showNotice({
+      ico: '📍',
+      title: title,
+      text: where,
+      tag: 'near-' + p.user_id,
+      open: () => openMember(p.user_id),
+    });
+    beep(940);
+    buzz([90, 60, 90]);
+    browserNotify(title, where, 'near-' + p.user_id);
+    state.lastNearby = { id: p.user_id, name: p.nickname, m: m, at: Date.now() };
+  }
+
+  function checkNearby() {
+    if (!state.me || !state.joined) return;
+    const me = state.me;
+    if (me.lat == null || me.lng == null || !isFinite(me.lat) || !isFinite(me.lng)) return;
+    const here = { lat: Number(me.lat), lng: Number(me.lng) };
+    const now = Date.now();
+    let dirty = false;
+
+    for (const p of nearbyCandidates().values()) {
+      if (!p || !p.user_id || p.user_id === me.user_id) continue;
+      if (!state.nearby[p.user_id]) { state.nearby[p.user_id] = { at: 0, inside: false }; dirty = true; }
+      const rec = state.nearby[p.user_id];
+
+      // 위치를 숨겼거나·오래된(오프라인) 사람은 '밖'으로 본다
+      if (p.hidden || p.lat == null || p.lng == null || !isFinite(p.lat) || !isFinite(p.lng) || isStale(p)) {
+        if (rec.inside) { rec.inside = false; dirty = true; }
+        continue;
+      }
+
+      const d = haversine(here, { lat: Number(p.lat), lng: Number(p.lng) });
+      if (d >= NEAR_EXIT_M) {
+        if (rec.inside) { rec.inside = false; dirty = true; }
+        continue;
+      }
+      if (rec.inside) continue;          // 300~500m 사이: 아직 '근처'인 상태 유지
+      if (d > NEAR_M) continue;
+
+      rec.inside = true;
+      dirty = true;
+      if (now - Number(rec.at || 0) < NEAR_COOLDOWN_MS) continue;
+      if (isNearbyMuted(p.user_id)) continue;
+      rec.at = now;
+      notifyNearby(p, d);
+    }
+
+    if (dirty) {
+      // 오래된 기록은 정리(7일)
+      for (const id of Object.keys(state.nearby)) {
+        const r = state.nearby[id];
+        if (!r || (now - Number(r.at || 0) > 7 * 24 * 60 * 60 * 1000 && !r.inside)) delete state.nearby[id];
+      }
+      LS.set(NEAR_KEY, state.nearby);
     }
   }
 
@@ -2911,13 +3011,17 @@
       }
       const mine = state.me && msg.sender_id === state.me.user_id;
       const group = isGroupChat(id);
-      const left = (group && mine) ? Number(msg.unread || 0) : 0;
+      // 카톡식 안 읽은 숫자 — 내 말풍선 왼쪽에 노란 숫자
+      //  · 그룹: 아직 안 읽은 멤버 수(3 → 2 → 1 → 사라짐)
+      //  · 1:1 : 상대가 읽기 전에는 1, 읽으면 바로 사라짐
+      const left = !mine ? 0 : (group ? Number(msg.unread || 0) : (msg.read_at ? 0 : 1));
+      const count = left > 0
+        ? '<span class="msg-unread" aria-label="' + (group ? '안 읽은 ' + left + '명' : '상대가 아직 읽지 않았어요') + '">' + left + '</span>'
+        : '';
       html += '<div class="msg' + (mine ? ' msg--me' : '') + (group && !mine ? ' msg--group' : '') + '" data-msg="' + esc(msg.id) + '">'
         + (group && !mine ? '<span class="msg-who">' + esc(nickOf(msg.sender_id)) + '</span>' : '')
-        + (group && mine
-          ? '<span class="msg-line">' + (left > 0 ? '<span class="msg-unread" aria-label="안 읽은 ' + left + '명">' + left + '</span>' : '') + '<span class="msg-bubble">' + esc(msg.body) + '</span></span>'
-          : '<span class="msg-bubble">' + esc(msg.body) + '</span>')
-        + '<span class="msg-time">' + esc(msgTime(msg.created_at)) + (mine ? (msg.read_at ? ' · 읽음' : '') : '') + '</span>'
+        + '<span class="msg-line">' + count + '<span class="msg-bubble">' + esc(msg.body) + '</span></span>'
+        + '<span class="msg-time">' + esc(msgTime(msg.created_at)) + (mine && msg.read_at ? ' · 읽음' : '') + '</span>'
         + '</div>';
     });
     setHTML(el.chatBody, html, 'chat');
@@ -2977,6 +3081,8 @@
     state.readSending[friendId] = true;
     try {
       await API.rpc('friend_mark_read', Object.assign(selfArgs(), { p_friend: friendId }));
+      // 상대 화면의 노란 '1'도 바로 사라지도록 알린다
+      rt.send(pairTopic(friendId), 'read', { from: state.me.user_id });
     } catch (e) { /* 다음 피드에서 다시 시도 */ }
     setTimeout(() => { state.readSending[friendId] = false; }, 1200);
   }
@@ -3069,6 +3175,7 @@
         state.viewGroup = groups.size ? groups.keys().next().value : null;
       }
       state.groupPeople = people;
+      checkNearby();
       checkGroupNotices(prev);
       renderGroups();
       renderList();
@@ -4026,9 +4133,12 @@
         }
         scheduleFeedRefresh(200);
       } else if (event === 'read') {
-        const gid = (payload && payload.group) || topic.replace(/^grp-/, '');
-        if (gid && state.chatWith === gid && !el.chatPanel.hidden) {
-          loadMessages(gid, { full: true });
+        // 그룹·1:1 둘 다: 상대가 읽으면 내 말풍선 숫자를 바로 다시 그린다
+        const gid = (payload && payload.group) || (/^grp-/.test(topic) ? topic.replace(/^grp-/, '') : '');
+        const fid = gid ? '' : topic.replace(/^pair-/, '').split('__').find((id) => id !== state.me.user_id);
+        const target = gid || fid;
+        if (target && state.chatWith === target && !el.chatPanel.hidden) {
+          loadMessages(target, { full: true });
         }
       }
     }
@@ -4149,9 +4259,11 @@
     if (opened) renderRouteBlock(opened);
     if (state.chatWith && !el.chatPanel.hidden) {
       renderChatSub();
-      loadMessages(state.chatWith, { full: isGroupChat(state.chatWith) });
+      // 열려 있는 대화는 매번 전체를 다시 받아 읽음(노란 숫자) 상태를 맞춘다
+      loadMessages(state.chatWith, { full: true });
       if (isGroupChat(state.chatWith)) markGroupRead(state.chatWith);
     }
+    checkNearby();
   }
 
   /* ───────────────────────── 20. 입장 ───────────────────────── */
@@ -4804,6 +4916,9 @@
     places: () => Array.from(state.places.entries()),
     fit: () => fitToPeople(false),
     reloadChat: () => (state.chatWith ? loadMessages(state.chatWith, { full: true }) : Promise.resolve([])),
+    checkNearby,
+    nearby: () => JSON.parse(JSON.stringify(state.nearby)),
+    sendMessage: (text) => { el.chatInput.value = text; return sendMessage(); },
     dump: () => ({
       me: state.me ? { ...state.me } : null,
       friends: Array.from(state.friends.values()),
