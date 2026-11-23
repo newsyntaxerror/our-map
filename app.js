@@ -1271,8 +1271,7 @@
   function renderRouteBar(m, model) {
     if (!el.rvWho) return;
     el.rvWho.textContent = m.nickname + ' 님의 이동 동선';
-    const bits = [model.pins.length + '개 지점', '총 ' + distText(model.meters), durText(model.spanMs) + ' 기록'];
-    if (model.startT) bits.push(hhmm(model.startT) + '~' + hhmm(model.endT));
+    const bits = [model.pins.length + '개 지점', '총 ' + distText(model.meters), durText(model.spanMs)];
     el.rvMeta.textContent = bits.join(' · ');
     el.rvTlCount.textContent = model.rows.length + '개 구간';
   }
