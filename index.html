@@ -24,7 +24,7 @@
 <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <link rel="stylesheet" href="./vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="./styles.css?v=17">
+<link rel="stylesheet" href="./styles.css?v=18">
 <script>
   /* 화면 확인용: 콘솔 에러를 남겨 두면 개발자도구 없이도 읽을 수 있습니다. */
   window.__ERRORS__ = [];
@@ -158,6 +158,7 @@
     <div class="sheet-head">
       <div class="tabs" id="tabs">
         <button class="tab is-on" id="tabFriends" type="button" data-tab="friends">친구 <span class="tab-count" id="friendCount">0</span></button>
+        <button class="tab" id="tabGroups" type="button" data-tab="groups">그룹 <span class="tab-count" id="groupCount">0</span></button>
         <button class="tab" id="tabChat" type="button" data-tab="chat">채팅 <span class="tab-badge" id="chatBadge" hidden>0</span></button>
       </div>
       <div class="sheet-head-actions">
@@ -203,6 +204,15 @@
           </button>
         </div>
       </div>
+    </div>
+
+    <!-- 그룹 탭 -->
+    <div class="tab-panel" id="panelGroups" hidden>
+      <div class="group-acts">
+        <button class="btn btn--ghost group-act" id="btnGroupCreate" type="button">＋ 그룹 만들기</button>
+        <button class="btn btn--ghost group-act" id="btnGroupJoin" type="button">초대 코드로 참여</button>
+      </div>
+      <div class="group-list" id="groupList"></div>
     </div>
 
     <!-- 채팅 탭 -->
@@ -307,6 +317,32 @@
   </div>
 
   <!-- 친구 추가 -->
+  <!-- 그룹 만들기 / 코드로 참여 -->
+  <div class="modal" id="groupModal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card modal-card--add" role="dialog" aria-modal="true" aria-labelledby="groupModalTitle">
+      <div class="modal-grip"></div>
+      <h3 class="add-title" id="groupModalTitle">그룹 만들기</h3>
+      <p class="add-sub" id="groupModalSub">그룹에 들어가면 서로 친구가 아니어도 위치와 동선이 보여요.</p>
+      <div class="add-form" id="groupForm">
+        <label class="field" id="groupNameField">
+          <span class="field-label">그룹 이름</span>
+          <input id="groupName" class="field-input" type="text" maxlength="20" placeholder="예: 우리 가족">
+        </label>
+        <label class="field" id="groupCodeField" hidden>
+          <span class="field-label">초대 코드</span>
+          <input id="groupCode" class="field-input field-input--code" type="text" maxlength="8"
+                 placeholder="예: STFH6Z" autocapitalize="characters" autocomplete="off" spellcheck="false">
+        </label>
+        <p class="auth-msg" id="groupMsg" hidden></p>
+        <button class="btn btn--primary" id="groupSubmit" type="button">만들기</button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn--ghost" id="groupCancel" type="button" data-close>닫기</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal" id="addModal" hidden>
     <div class="modal-backdrop" data-close></div>
     <div class="modal-card modal-card--add" role="dialog" aria-modal="true" aria-labelledby="addTitle">
@@ -429,7 +465,7 @@
 </main>
 
 <script src="./vendor/leaflet/leaflet.js"></script>
-<script src="./config.js?v=17"></script>
-<script src="./app.js?v=17"></script>
+<script src="./config.js?v=18"></script>
+<script src="./app.js?v=18"></script>
 </body>
 </html>

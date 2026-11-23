@@ -348,7 +348,10 @@
     'idBanner', 'btnIdMake', 'btnIdLater', 'idModal', 'idForm', 'idInput', 'idPw', 'idMsg',
     'btnIdSave', 'idClose',
     'app', 'map', 'meChip', 'meChipPin', 'myCode', 'myName', 'btnAddFriend', 'btnShare',
-    'sheet', 'btnCollapse', 'tabs', 'tabFriends', 'tabChat', 'friendCount', 'chatBadge',
+    'sheet', 'btnCollapse', 'tabs', 'tabFriends', 'tabGroups', 'tabChat', 'friendCount', 'groupCount', 'chatBadge',
+    'panelGroups', 'groupList', 'btnGroupCreate', 'btnGroupJoin',
+    'groupModal', 'groupModalTitle', 'groupModalSub', 'groupNameField', 'groupName', 'groupCodeField', 'groupCode',
+    'groupMsg', 'groupSubmit', 'groupCancel',
     'btnSheetHide', 'btnAddFriend2', 'reqBox', 'reqCount', 'reqList',
     'fabLocate', 'sheetOpen', 'sheetOpenBadge',
     'panelFriends', 'panelChat', 'memberList', 'btnUpdate', 'updateSub', 'btnAuto', 'btnCopy',
@@ -418,6 +421,11 @@
     carry: null,          // 이 기기에 남아 있는(아이디를 붙일) 신원
     places: new Map(),    // '위도,경도' → 머문 곳 장소·업종(캐시)
     autoLogin: true,      // 로그인 화면의 '자동 로그인' 체크 상태
+    groups: new Map(),      // group_id → 그룹(멤버 포함)
+    groupPeople: new Map(), // user_id → 그룹으로만 아는 사람(위치·동선)
+    viewGroup: null,        // 지도에서 보고 있는 그룹
+    groupMode: 'create',    // 그룹 모달 모드
+    addGroupCode: '',       // 초대 링크(?group=)로 받은 코드
   };
 
   /* ───────────────────── 3-B. 머문 곳 장소 판별 (OpenStreetMap · 키 없음) ─────────────────────
@@ -732,14 +740,19 @@
   function personById(id) {
     if (!id || !state.me) return null;
     if (id === state.me.user_id) return state.me;
-    return state.friends.get(id) || null;
+    return state.friends.get(id) || state.groupPeople.get(id) || null;
   }
 
   function allPeople() {
     const arr = [];
     if (state.me) arr.push(state.me);
     for (const f of state.friends.values()) arr.push(f);
+    for (const g of state.groupPeople.values()) arr.push(g);
     return arr;
+  }
+
+  function isGroupChat(id) {
+    return String(id || '').indexOf('g-') === 0;
   }
 
   function totalUnread() {
@@ -1080,6 +1093,7 @@
         markMyReadIfChatting();
         renderAll();
         syncRealtime();
+        refreshGroups();
       } catch (e) {
         if (!state.errShown) {
           state.errShown = true;
@@ -1305,12 +1319,26 @@
       return String(a.nickname).localeCompare(String(b.nickname), 'ko');
     });
 
-    if (!list.length) {
+    const groupRows = Array.from(state.groups.values()).map((g) => {
+      const last = g.last_message;
+      const lastTxt = last
+        ? ((last.sender_id === state.me.user_id ? '나: ' : nickOf(last.sender_id) + ': ') + last.body)
+        : '아직 대화가 없어요';
+      return '<button class="convo" type="button" data-chat="' + esc(g.id) + '">'
+        + '<span class="convo-avatar" style="--c:#0fb9a3">#<span class="convo-emoji">👥</span></span>'
+        + '<span class="convo-body">'
+        + '<span class="convo-top"><b>' + esc(g.name) + '</b>'
+        + '<span class="convo-time">' + esc(last ? msgTime(last.created_at) : '') + '</span></span>'
+        + '<span class="convo-last">' + esc(lastTxt) + '</span>'
+        + '</span></button>';
+    }).join('');
+
+    if (!list.length && !groupRows) {
       setHTML(el.convoList, '<div class="convo-empty">친구와 대화를 시작해 보세요.<br>'
         + '친구 탭에서 친구를 누르면 [채팅] 버튼이 있어요.</div>', 'convos');
       return;
     }
-    setHTML(el.convoList, list.map(convoRowHTML).join(''), 'convos');
+    setHTML(el.convoList, groupRows + list.map(convoRowHTML).join(''), 'convos');
   }
 
   function renderAll() {
@@ -2329,6 +2357,7 @@
 
   /* ───────────────────────── 12. 채팅 ───────────────────────── */
   function openChat(friendId) {
+    if (isGroupChat(friendId)) { openGroupChat(friendId); return; }
     const f = state.friends.get(friendId);
     if (!f) { toast('친구 목록에 없는 사람이에요', 2200); return; }
     state.chatWith = friendId;
@@ -2348,6 +2377,11 @@
   }
 
   function renderChatSub() {
+    if (isGroupChat(state.chatWith)) {
+      const g = state.groups.get(state.chatWith);
+      if (g) el.chatSub.textContent = '그룹 · ' + (g.member_count || (g.members || []).length) + '명';
+      return;
+    }
     const f = state.chatWith ? state.friends.get(state.chatWith) : null;
     if (!f) return;
     const bits = [];
@@ -2389,7 +2423,9 @@
         lastDay = day;
       }
       const mine = state.me && msg.sender_id === state.me.user_id;
-      html += '<div class="msg' + (mine ? ' msg--me' : '') + '" data-msg="' + esc(msg.id) + '">'
+      const group = isGroupChat(id);
+      html += '<div class="msg' + (mine ? ' msg--me' : '') + (group && !mine ? ' msg--group' : '') + '" data-msg="' + esc(msg.id) + '">'
+        + (group && !mine ? '<span class="msg-who">' + esc(nickOf(msg.sender_id)) + '</span>' : '')
         + '<span class="msg-bubble">' + esc(msg.body) + '</span>'
         + '<span class="msg-time">' + esc(msgTime(msg.created_at)) + (mine ? (msg.read_at ? ' · 읽음' : '') : '') + '</span>'
         + '</div>';
@@ -2399,14 +2435,17 @@
 
   async function loadMessages(friendId, opts = {}) {
     if (!state.me) return [];
+    const group = isGroupChat(friendId);
     try {
-      const args = Object.assign(selfArgs(), { p_friend: friendId });
+      const args = group
+        ? Object.assign(selfArgs(), { p_group: friendId })
+        : Object.assign(selfArgs(), { p_friend: friendId });
       if (!opts.full) {
         const list = state.messages.get(friendId) || [];
         const last = list[list.length - 1];
         if (last && last.created_at) args.p_since = last.created_at;
       }
-      const rows = await API.rpc('friend_messages', args);
+      const rows = await API.rpc(group ? 'group_messages' : 'friend_messages', args);
       const incoming = Array.isArray(rows) ? rows : [];
       const prev = opts.full ? [] : (state.messages.get(friendId) || []);
       const byId = new Map(prev.map((m) => [String(m.id), m]));
@@ -2459,7 +2498,17 @@
     if (!body) return;
     el.chatInput.value = '';
     el.btnChatSend.classList.add('is-busy');
+    const group = isGroupChat(friendId);
     try {
+      if (group) {
+        await API.rpc('group_send_message', Object.assign(selfArgs(), { p_group: friendId, p_body: body }));
+        await loadMessages(friendId, { full: false });
+        const g = state.groups.get(friendId);
+        if (g) g.last_message = { body, sender_id: state.me.user_id, created_at: new Date().toISOString() };
+        renderConvos();
+        el.chatBody.scrollTop = el.chatBody.scrollHeight;
+        return;
+      }
       await API.rpc('friend_send_message', Object.assign(selfArgs(), { p_to: friendId, p_body: body }));
       await loadMessages(friendId, { full: false });
       const f = state.friends.get(friendId);
@@ -2476,6 +2525,228 @@
       if (!el.chatInput.value) el.chatInput.value = body;
     } finally {
       el.btnChatSend.classList.remove('is-busy');
+    }
+  }
+
+  /* ───────────────────────── 12-B. 그룹 (친구 추가 없이 위치·채팅) ───────────────────────── */
+  function normalizeGroupMember(mb, group) {
+    return {
+      user_id: String(mb.user_id),
+      nickname: String(mb.nickname || '친구').slice(0, 20),
+      emoji: mb.emoji || '🙂',
+      status_text: mb.status_text || '',
+      color: mb.color || colorFor(mb.user_id),
+      lat: mb.lat == null ? null : Number(mb.lat),
+      lng: mb.lng == null ? null : Number(mb.lng),
+      accuracy: mb.accuracy == null ? null : Number(mb.accuracy),
+      battery: mb.battery == null ? null : Number(mb.battery),
+      charging: !!mb.charging,
+      speed_kmh: mb.speed_kmh == null ? null : Number(mb.speed_kmh),
+      stay_since: mb.stay_since || null,
+      updated_at: mb.updated_at || null,
+      unread: 0,
+      isFriend: !!mb.is_friend,
+      groupId: group.id,
+      groupName: group.name,
+      viaGroup: true,
+    };
+  }
+
+  async function refreshGroups() {
+    if (!state.me || !READY || !state.joined) return;
+    try {
+      const rows = await API.rpc('group_feed', selfArgs());
+      const list = Array.isArray(rows) ? rows : [];
+      const groups = new Map();
+      const people = new Map();
+      list.forEach((g) => {
+        groups.set(g.id, g);
+        (g.members || []).forEach((mb) => {
+          if (mb.user_id === state.me.user_id) return;
+          if (state.friends.has(mb.user_id)) return;   // 친구는 친구 정보를 그대로
+          people.set(mb.user_id, normalizeGroupMember(mb, g));
+        });
+      });
+      state.groups = groups;
+      state.groupPeople = people;
+      renderGroups();
+      renderList();
+      renderPins();
+      renderConvos();
+      syncLiveRoutes();
+    } catch (e) {
+      console.warn('[우리끼리] groups', e);
+    }
+  }
+
+  function groupMemberChip(p) {
+    const off = isStale(p);
+    const since = p.stay_since || (p.lat != null ? staySinceOf(p) : null);
+    return '<button type="button" class="gc-mem' + (off ? ' is-off' : '') + '" data-gmem="' + esc(p.user_id) + '"'
+      + ' style="--c:' + esc(p.color || colorFor(p.user_id)) + '">'
+      + '<i>' + esc(p.emoji || initialOf(p.nickname)) + '</i>' + esc(p.nickname)
+      + (since ? '<em>⏱ ' + esc(stayChip(since)) + '</em>' : '')
+      + '</button>';
+  }
+
+  function renderGroups() {
+    if (!el.groupList) return;
+    const groups = Array.from(state.groups.values());
+    if (el.groupCount) el.groupCount.textContent = String(groups.length);
+    if (!groups.length) {
+      setHTML(el.groupList, '<div class="group-empty">아직 그룹이 없어요.<br>'
+        + '그룹을 만들고 초대 코드를 보내면<br>친구 추가 없이도 서로의 위치가 보여요.</div>', 'groups');
+      return;
+    }
+    const html = groups.map((g) => {
+      const chips = (g.members || [])
+        .filter((mb) => mb.user_id !== state.me.user_id)
+        .map((mb) => groupMemberChip(state.friends.get(mb.user_id) || state.groupPeople.get(mb.user_id) || normalizeGroupMember(mb, g)))
+        .join('');
+      return '<div class="group-card' + (state.viewGroup === g.id ? ' is-on' : '') + '" data-group="' + esc(g.id) + '">'
+        + '<div class="gc-head"><span class="gc-name">' + esc(g.name) + '</span>'
+        + '<span class="gc-count">' + (g.member_count || (g.members || []).length) + '명</span></div>'
+        + '<div class="gc-code"><span>초대 코드</span><b>' + esc(g.invite_code) + '</b>'
+        + '<button type="button" class="gc-mini" data-gcopy="' + esc(g.invite_code) + '">코드 복사</button>'
+        + '<button type="button" class="gc-mini" data-glink="' + esc(g.invite_code) + '">링크 복사</button></div>'
+        + '<div class="gc-members">' + (chips || '<span class="gc-nobody">아직 나뿐이에요 — 초대 코드를 보내 보세요.</span>') + '</div>'
+        + '<div class="gc-acts">'
+        + '<button type="button" class="btn btn--primary" data-gchat="' + esc(g.id) + '">단체 채팅</button>'
+        + '<button type="button" class="btn btn--ghost" data-gleave="' + esc(g.id) + '">나가기</button>'
+        + '</div></div>';
+    }).join('');
+    setHTML(el.groupList, html, 'groups');
+  }
+
+  function focusGroup(g) {
+    if (!state.map || !g) { renderGroups(); return; }
+    const pts = (g.members || []).filter((m) => m.lat != null && m.lng != null);
+    if (!pts.length) { renderGroups(); return; }
+    const bounds = L.latLngBounds(pts.map((m) => [m.lat, m.lng]));
+    if (pts.length === 1 || bounds.getNorthEast().equals(bounds.getSouthWest())) {
+      state.map.flyTo(bounds.getCenter(), 15, { duration: 0.5 });
+    } else {
+      state.map.flyToBounds(bounds, { padding: [46, 46], maxZoom: 16, duration: 0.5 });
+    }
+    renderGroups();
+  }
+
+  function openGroupModal(mode) {
+    state.groupMode = mode === 'join' ? 'join' : 'create';
+    const join = state.groupMode === 'join';
+    el.groupModalTitle.textContent = join ? '초대 코드로 참여' : '그룹 만들기';
+    el.groupModalSub.textContent = join
+      ? '친구에게 받은 그룹 초대 코드를 넣으면 바로 들어가요.'
+      : '그룹에 들어가면 서로 친구가 아니어도 위치와 동선이 보여요.';
+    el.groupNameField.hidden = join;
+    el.groupCodeField.hidden = !join;
+    el.groupSubmit.textContent = join ? '참여' : '만들기';
+    delete el.groupSubmit.dataset.label;
+    setAuthMsg(el.groupMsg, '');
+    el.groupModal.hidden = false;
+    setTimeout(() => { try { (join ? el.groupCode : el.groupName).focus(); } catch (e) {} }, 120);
+  }
+
+  function closeGroupModal() {
+    if (el.groupModal) el.groupModal.hidden = true;
+  }
+
+  async function submitGroup() {
+    const join = state.groupMode === 'join';
+    const name = String(el.groupName.value || '').trim();
+    const code = normalizeCode(el.groupCode.value || '');
+    setAuthMsg(el.groupMsg, '');
+    if (!join && !name) { setAuthMsg(el.groupMsg, '그룹 이름을 입력해 주세요'); el.groupName.focus(); return; }
+    if (join && !code) { setAuthMsg(el.groupMsg, '초대 코드를 입력해 주세요'); el.groupCode.focus(); return; }
+
+    setBtnBusy(el.groupSubmit, true, join ? '참여 중…' : '만드는 중…');
+    try {
+      const out = await API.rpc(join ? 'group_join' : 'group_create', join
+        ? Object.assign(selfArgs(), { p_code: code })
+        : Object.assign(selfArgs(), { p_name: name }));
+      closeGroupModal();
+      el.groupName.value = '';
+      el.groupCode.value = '';
+      await refreshGroups();
+      if (out && out.id) {
+        state.viewGroup = out.id;
+        focusGroup(state.groups.get(out.id) || out);
+      }
+      setTab('groups');
+      toast(join ? (out.name || '그룹') + '에 참여했어요' : (out.name || '그룹') + '을 만들었어요 — 초대 코드를 보내 보세요', 3400);
+    } catch (e) {
+      const raw = String(e.detail || e.message || e);
+      setAuthMsg(el.groupMsg, /not_found/.test(raw) ? '그런 초대 코드를 찾지 못했어요' : authErrText(e));
+    } finally {
+      setBtnBusy(el.groupSubmit, false, join ? '참여' : '만들기');
+    }
+  }
+
+  async function joinGroupByCode(code, silent) {
+    const c = normalizeCode(code || '');
+    if (!c || !state.me) return false;
+    try {
+      const out = await API.rpc('group_join', Object.assign(selfArgs(), { p_code: c }));
+      await refreshGroups();
+      setTab('groups');
+      if (out && out.id) { state.viewGroup = out.id; focusGroup(state.groups.get(out.id) || out); }
+      toast((out.name || '그룹') + '에 참여했어요', 3200);
+      return true;
+    } catch (e) {
+      const raw = String(e.detail || e.message || e);
+      if (!silent) {
+        toast(/not_found/.test(raw) ? '그룹 초대 코드를 찾지 못했어요' : '그룹에 참여하지 못했어요 — ' + errText(e), 3600);
+      }
+      return false;
+    }
+  }
+
+  async function leaveGroup(gid) {
+    const g = state.groups.get(gid);
+    if (!g) return;
+    if (!window.confirm(g.name + '에서 나갈까요?\n나가면 이 그룹의 위치·동선·대화가 보이지 않아요.')) return;
+    try {
+      await API.rpc('group_leave', Object.assign(selfArgs(), { p_group: gid }));
+      if (state.chatWith === gid) closeChat();
+      state.viewGroup = null;
+      await refreshGroups();
+      toast(g.name + '에서 나왔어요', 2600);
+    } catch (e) {
+      toast('그룹에서 나가지 못했어요 — ' + errText(e), 3200);
+    }
+  }
+
+  function openGroupChat(gid) {
+    const g = state.groups.get(gid);
+    if (!g) { toast('그룹을 찾지 못했어요', 2200); return; }
+    state.chatWith = gid;
+    el.chatPanel.hidden = false;
+    el.chatAvatar.textContent = '#';
+    el.chatAvatar.style.setProperty('--c', '#0fb9a3');
+    el.chatName.textContent = g.name;
+    el.chatSub.textContent = '그룹 · ' + (g.member_count || (g.members || []).length) + '명';
+    renderChatMessages();
+    el.chatBody.scrollTop = el.chatBody.scrollHeight;
+    loadMessages(gid, { full: true }).then(() => {
+      el.chatInput.focus();
+      el.chatBody.scrollTop = el.chatBody.scrollHeight;
+    });
+  }
+
+  function nickOf(userId) {
+    if (state.me && userId === state.me.user_id) return state.me.nickname;
+    const p = state.friends.get(userId) || state.groupPeople.get(userId);
+    return p ? p.nickname : '친구';
+  }
+
+  async function copyText(text, okMsg) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(okMsg, 2200);
+      return true;
+    } catch (e) {
+      toast(text, 4000);
+      return false;
     }
   }
 
@@ -2591,14 +2862,17 @@
   }
 
   function setTab(tab) {
-    state.tab = tab === 'chat' ? 'chat' : 'friends';
+    state.tab = tab === 'chat' ? 'chat' : (tab === 'groups' ? 'groups' : 'friends');
     el.tabFriends.classList.toggle('is-on', state.tab === 'friends');
+    if (el.tabGroups) el.tabGroups.classList.toggle('is-on', state.tab === 'groups');
     el.tabChat.classList.toggle('is-on', state.tab === 'chat');
     el.panelFriends.hidden = state.tab !== 'friends';
+    if (el.panelGroups) el.panelGroups.hidden = state.tab !== 'groups';
     el.panelChat.hidden = state.tab !== 'chat';
     el.sheet.classList.toggle('sheet--chat', state.tab === 'chat');
     setTimeout(updateSheetHeight, 30);
     if (state.tab === 'chat') renderConvos();
+    if (state.tab === 'groups') { renderGroups(); refreshGroups(); }
   }
 
   /* ───────────────────────── 15. 이동 기록 채우기 ───────────────────────── */
@@ -2621,11 +2895,17 @@
 
     if (pts.length >= 2) return pts;
 
+    const groupOnly = !isMe && !state.friends.has(id) && state.groupPeople.has(id);
     try {
-      const rows = await API.rpc('friend_history', Object.assign(selfArgs(), {
-        p_friend: isMe ? '' : id,
-        p_since: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
-      }));
+      const rows = groupOnly
+        ? await API.rpc('group_history', Object.assign(selfArgs(), {
+          p_group: state.groupPeople.get(id).groupId,
+          p_since: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
+        })).then((all) => (Array.isArray(all) ? all.filter((r) => r.user_id === id) : []))
+        : await API.rpc('friend_history', Object.assign(selfArgs(), {
+          p_friend: isMe ? '' : id,
+          p_since: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
+        }));
       if (Array.isArray(rows) && rows.length) pts = setHistory(id, rows.map((r) => ({
         lat: r.lat, lng: r.lng,
         t: new Date(r.recorded_at).getTime(),
@@ -2641,10 +2921,15 @@
 
   async function loadHistoryAll() {
     try {
-      const rows = await API.rpc('friends_history_since', Object.assign(selfArgs(), {
-        p_since: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
-      }));
-      if (!Array.isArray(rows) || !rows.length) return;
+      const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const [friendRows, groupRows] = await Promise.all([
+        API.rpc('friends_history_since', Object.assign(selfArgs(), { p_since: since })).catch(() => []),
+        state.groups.size
+          ? API.rpc('groups_history_since', Object.assign(selfArgs(), { p_since: new Date(Date.now() - 6 * 3600 * 1000).toISOString() })).catch(() => [])
+          : Promise.resolve([]),
+      ]);
+      const rows = [].concat(Array.isArray(friendRows) ? friendRows : [], Array.isArray(groupRows) ? groupRows : []);
+      if (!rows.length) return;
 
       const byUser = new Map();
       rows.forEach((r) => {
@@ -3255,6 +3540,11 @@
       state.addAfterStart = '';
       setTimeout(() => sendFriendRequest(code), 500);
     }
+    if (state.addGroupCode) {
+      const gcode = state.addGroupCode;
+      state.addGroupCode = '';
+      setTimeout(() => { joinGroupByCode(gcode, true).then((ok) => { if (!ok) toast('그룹 초대 코드를 확인하지 못했어요 — 코드를 다시 확인해 주세요', 3600); }); }, 700);
+    }
     clearAddParam();
   }
 
@@ -3578,7 +3868,9 @@
     el.mChat.addEventListener('click', () => {
       const id = modalUser;
       closeModal();
-      if (id) openChat(id);
+      if (!id) return;
+      const gp = state.groupPeople.get(id);
+      openChat(gp ? gp.groupId : id);
     });
     el.mLocate.addEventListener('click', () => {
       const m = personById(modalUser || state.selected);
@@ -3626,6 +3918,42 @@
       try { el.inputCode.setSelectionRange(pos, pos); } catch (e) {}
     });
     el.addClose.addEventListener('click', closeAddModal);
+
+    /* ── 그룹 ── */
+    if (el.btnGroupCreate) el.btnGroupCreate.addEventListener('click', () => openGroupModal('create'));
+    if (el.btnGroupJoin) el.btnGroupJoin.addEventListener('click', () => openGroupModal('join'));
+    if (el.groupSubmit) el.groupSubmit.addEventListener('click', submitGroup);
+    if (el.groupCancel) el.groupCancel.addEventListener('click', closeGroupModal);
+    if (el.groupModal) {
+      el.groupModal.addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeGroupModal(); });
+      [el.groupName, el.groupCode].forEach((input) => {
+        if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submitGroup(); } });
+      });
+    }
+    if (el.groupList) {
+      el.groupList.addEventListener('click', (e) => {
+        const chat = e.target.closest('[data-gchat]');
+        if (chat) { openGroupChat(chat.getAttribute('data-gchat')); return; }
+        const leave = e.target.closest('[data-gleave]');
+        if (leave) { leaveGroup(leave.getAttribute('data-gleave')); return; }
+        const mem = e.target.closest('[data-gmem]');
+        if (mem) { const p = personById(mem.getAttribute('data-gmem')); if (p) openMember(p.user_id); return; }
+        const cp = e.target.closest('[data-gcopy]');
+        if (cp) { copyText(cp.getAttribute('data-gcopy'), '그룹 초대 코드를 복사했어요'); return; }
+        const lk = e.target.closest('[data-glink]');
+        if (lk) {
+          const url = location.origin + location.pathname + '?group=' + encodeURIComponent(lk.getAttribute('data-glink'));
+          copyText(url, '그룹 초대 링크를 복사했어요 — 보내면 바로 들어와요');
+          return;
+        }
+        const card = e.target.closest('[data-group]');
+        if (card) {
+          const gid = card.getAttribute('data-group');
+          state.viewGroup = gid;
+          focusGroup(state.groups.get(gid));
+        }
+      });
+    }
     el.btnCopyCode.addEventListener('click', copyMyCode);
     el.btnCopyLink.addEventListener('click', copyMyLink);
 
@@ -3678,8 +4006,9 @@
   function clearAddParam() {
     try {
       const url = new URL(location.href);
-      if (!url.searchParams.has('add')) return;
+      if (!url.searchParams.has('add') && !url.searchParams.has('group')) return;
       url.searchParams.delete('add');
+      url.searchParams.delete('group');
       history.replaceState(null, '', url.pathname + url.search + url.hash);
     } catch (e) {}
   }
@@ -3698,7 +4027,10 @@
     loadPlaceCache();
 
     let addCode = '';
+    let addGroup = '';
     try { addCode = normalizeCode(new URLSearchParams(location.search).get('add') || ''); } catch (e) {}
+    try { addGroup = normalizeCode(new URLSearchParams(location.search).get('group') || ''); } catch (e) {}
+    state.addGroupCode = addGroup;
     if (addCode) {
       el.inviteNote.hidden = false;
       el.inviteCodeLabel.textContent = addCode;
