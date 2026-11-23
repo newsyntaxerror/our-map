@@ -1289,6 +1289,12 @@
      · 알림을 끈 사람(개인/그룹)의 소식은 배너도 브라우저 알림도 띄우지 않는다. */
   let audioCtx = null;
 
+  function wakeAudioOnce() {
+    initAudio();
+    document.removeEventListener('pointerdown', wakeAudioOnce, true);
+    document.removeEventListener('keydown', wakeAudioOnce, true);
+  }
+
   function initAudio() {
     try {
       if (!audioCtx) {
@@ -1321,13 +1327,15 @@
     try { if (navigator.vibrate) navigator.vibrate(ms || 70); } catch (e) {}
   }
 
-  function browserNotify(title, body, tag) {
+  function browserNotify(title, body, tag, opts) {
     try {
       if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+      const o = opts || {};
       const n = new Notification(title, {
         body: body || '', tag: tag || '',
         icon: './icons/icon-192.png', badge: './icons/icon-192.png',
-        silent: true,
+        silent: o.sound ? false : true,
+        vibrate: o.sound ? [90, 60, 90] : undefined,
       });
       n.onclick = () => { try { window.focus(); } catch (e) {} n.close(); };
     } catch (e) { /* 안드로이드 크롬 등 생성자 미지원 */ }
@@ -1529,9 +1537,10 @@
       tag: 'near-' + p.user_id,
       open: () => openMember(p.user_id),
     });
+    initAudio();
     beep(940);
     buzz([90, 60, 90]);
-    browserNotify(title, where, 'near-' + p.user_id);
+    browserNotify(title, where, 'near-' + p.user_id, { sound: true });
     state.lastNearby = { id: p.user_id, name: p.nickname, m: m, at: Date.now() };
   }
 
@@ -4928,6 +4937,9 @@
       errors: (window.__ERRORS__ || []).slice(),
     }),
   };
+
+  document.addEventListener('pointerdown', wakeAudioOnce, true);
+  document.addEventListener('keydown', wakeAudioOnce, true);
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
