@@ -1741,7 +1741,8 @@ svg { display: block; }
 
 /* ───── 동선 화면 (지도는 그대로, 위에 얇은 컨트롤만) ───── */
 .app.is-route .topbar,
-.app.is-route .sheet { display: none !important; }
+.app.is-route .sheet,
+.app.is-route .permission-hint { display: none !important; }
 .app.is-route .toast { bottom: calc(24px + var(--safe-bottom)); }
 .app.is-route .leaflet-bottom.leaflet-left { bottom: calc(8px + var(--safe-bottom)); transition: none; }
 
