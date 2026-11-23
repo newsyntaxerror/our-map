@@ -1710,3 +1710,386 @@ svg { display: block; }
   display: inline-grid;
   place-items: center;
 }
+
+/* =========================================================
+   v10 — 이동 동선 상세 보기 (지도 위 전체 동선)
+   ========================================================= */
+
+/* 상세 시트의 동선 요약 + [이동 동선 보기] */
+.route-hint {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--muted-2);
+  flex: none;
+}
+.btn--route {
+  margin-top: 9px;
+  min-height: 46px;
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #13c9b0, #0aa08c);
+  box-shadow: 0 8px 20px rgba(10, 160, 140, .24), inset 0 1px 0 rgba(255, 255, 255, .28);
+}
+.btn--route svg { width: 17px; height: 17px; flex: none; }
+.btn--route:disabled {
+  color: var(--muted-2);
+  background: #eef2f8;
+  box-shadow: none;
+}
+
+/* ───── 동선 화면 (지도는 그대로, 위에 얇은 컨트롤만) ───── */
+.app.is-route .topbar,
+.app.is-route .sheet { display: none !important; }
+.app.is-route .toast { bottom: calc(24px + var(--safe-bottom)); }
+.app.is-route .leaflet-bottom.leaflet-left { bottom: calc(8px + var(--safe-bottom)); transition: none; }
+
+.routeview {
+  position: fixed;
+  inset: 0;
+  z-index: 700;
+  pointer-events: none;
+}
+
+.rv-bar {
+  position: absolute;
+  top: calc(var(--safe-top) + 10px);
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 7px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, .96);
+  backdrop-filter: blur(16px) saturate(1.4);
+  border: 1px solid rgba(255, 255, 255, .85);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, .18);
+  pointer-events: auto;
+}
+.rv-icon {
+  width: 36px; height: 36px;
+  border-radius: 12px;
+  display: grid; place-items: center;
+  color: var(--ink-2);
+  background: #f2f5fa;
+  flex: none;
+}
+.rv-icon svg { width: 20px; height: 20px; }
+.rv-icon:active { transform: scale(.94); }
+
+.rv-who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-left: 2px;
+}
+.rv-who b {
+  font-size: 13.5px;
+  font-weight: 800;
+  letter-spacing: -.02em;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rv-who span {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rv-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 11px;
+  border-radius: 12px;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  white-space: nowrap;
+  transition: transform .12s, background .15s, color .15s;
+}
+.rv-chip svg { width: 15px; height: 15px; }
+.rv-chip.is-on { color: #fff; background: var(--accent-deep); }
+.rv-chip:active { transform: scale(.95); }
+.rv-chip--close { color: var(--ink-2); background: #f2f5fa; }
+
+/* ───── 상세 타임라인 (아래에서 올라오는 작은 시트) ───── */
+.rv-timeline {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(8px + var(--safe-bottom));
+  max-height: 44vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, .98);
+  backdrop-filter: blur(18px) saturate(1.4);
+  box-shadow: 0 -14px 36px rgba(2, 8, 20, .24);
+  border: 1px solid rgba(255, 255, 255, .9);
+  overflow: hidden;
+  pointer-events: auto;
+  animation: sheet-up .24s cubic-bezier(.22, 1, .36, 1);
+}
+.rv-tl-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px 16px 7px;
+}
+.rv-tl-head b {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: -.01em;
+}
+.rv-tl-count {
+  font-size: 10.5px;
+  font-weight: 800;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+.rv-tl-hide {
+  margin-left: auto;
+  width: 28px; height: 28px;
+  border-radius: 9px;
+  display: grid; place-items: center;
+  color: var(--muted);
+  background: #f2f5fa;
+  font-size: 12px;
+  font-weight: 800;
+}
+.rv-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 10px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.rv-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 8px;
+  border-radius: 12px;
+  text-align: left;
+  transition: background .12s;
+}
+.rv-row + .rv-row { border-top: 1px solid #f1f5fa; }
+.rv-row.is-active { background: #eef7f5; }
+.rv-row:active { background: #f3f7fb; }
+.rv-row-num {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: var(--c, #0fb9a3);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  display: grid; place-items: center;
+  flex: none;
+}
+.rv-row-ico {
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  font-size: 12px;
+  flex: none;
+}
+.rv-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.rv-row-body b {
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rv-row-body span {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rv-row-go {
+  flex: none;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  padding: 3px 7px;
+  border-radius: 999px;
+}
+.rv-empty {
+  padding: 14px 10px 18px;
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* ───── 지도 위 동선 핀 · 방향 화살표 ───── */
+.rv-pin-host, .rv-arrow-host { background: none; border: 0; }
+
+.rv-pin {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .97);
+  box-shadow: 0 3px 10px rgba(15, 23, 42, .24);
+  font-size: 10.5px;
+  font-weight: 800;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.rv-pin-num {
+  width: 17px; height: 17px;
+  border-radius: 50%;
+  background: var(--c, #0fb9a3);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 800;
+  display: grid; place-items: center;
+  flex: none;
+}
+.rv-pin-txt { line-height: 1.25; }
+.rv-pin-txt b { font-weight: 800; }
+.rv-pin-tag {
+  font-size: 8.5px;
+  font-weight: 800;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  padding: 1px 5px;
+  border-radius: 999px;
+}
+.rv-pin-tag--now { color: #b45309; background: #fef3c7; }
+.rv-pin--start, .rv-pin--now { padding: 4px 9px 4px 7px; }
+.rv-pin--stay { padding-left: 3px; }
+
+.rv-pin-dot {
+  position: relative;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--c, #0fb9a3);
+  box-shadow: 0 0 0 3px rgba(15, 185, 163, .16);
+  flex: none;
+}
+.rv-pin--start .rv-pin-dot {
+  background: #fff;
+  border: 3px solid var(--c, #0fb9a3);
+  width: 13px; height: 13px;
+}
+.rv-pin--now .rv-pin-dot::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: 50%;
+  border: 2px solid var(--c, #0fb9a3);
+  opacity: .55;
+  animation: pulse 2.4s ease-out infinite;
+}
+
+.rv-arrow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 16px; height: 16px;
+  transform: translate(-50%, -50%) rotate(var(--a, 0deg));
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .95);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, .22);
+  display: grid; place-items: center;
+  color: var(--c, #0fb9a3);
+}
+.rv-arrow svg { width: 10px; height: 10px; }
+
+/* ───── 동선 핀 팝업 ───── */
+.rv-pop .leaflet-popup-content-wrapper {
+  border-radius: 16px;
+  box-shadow: 0 14px 34px rgba(2, 8, 20, .22);
+  padding: 0;
+}
+.rv-pop .leaflet-popup-content {
+  margin: 13px 15px;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--ink);
+  line-height: 1.4;
+}
+.rv-pop .leaflet-popup-tip { box-shadow: 0 3px 8px rgba(2, 8, 20, .12); }
+.rv-pop-k {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .01em;
+  color: var(--accent-deep);
+}
+.rv-pop-t {
+  margin-top: 2px;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: -.02em;
+  color: var(--ink);
+}
+.rv-pop dl {
+  margin: 9px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.rv-pop dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+.rv-pop dt { color: var(--muted); font-weight: 600; }
+.rv-pop dd { margin: 0; color: var(--ink); font-weight: 700; text-align: right; }
+.rv-pop-note {
+  margin: 9px 0 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted-2);
+}
+
+/* 넓은 화면: 컨트롤 바·타임라인을 가운데 기둥으로 */
+@media (min-width: 720px) {
+  .rv-bar {
+    left: 50%;
+    right: auto;
+    width: 520px;
+    margin-left: -260px;
+  }
+  .rv-timeline {
+    left: 50%;
+    right: auto;
+    width: 460px;
+    margin-left: -230px;
+  }
+}

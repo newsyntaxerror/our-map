@@ -24,7 +24,7 @@
 <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <link rel="stylesheet" href="./vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="./styles.css?v=9">
+<link rel="stylesheet" href="./styles.css?v=10">
 <script>
   /* 화면 확인용: 콘솔 에러를 남겨 두면 개발자도구 없이도 읽을 수 있습니다. */
   window.__ERRORS__ = [];
@@ -176,10 +176,13 @@
       <section class="route-block" id="mRouteBlock">
         <div class="route-head">
           <span class="route-title">동선 · 머문 곳</span>
-          <button class="route-toggle is-on" id="mRouteToggle" type="button">경로 숨기기</button>
+          <span class="route-hint" id="mRouteHint"></span>
         </div>
         <p class="route-sum" id="mRouteSum">이동 기록을 불러오는 중…</p>
-        <ol class="timeline" id="mTimeline"></ol>
+        <button class="btn btn--route" id="mRouteOpen" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18.5c0-2.8 3.5-2.3 5.5-4.3 1.6-1.6 0-4.7 3-6.3 2.1-1.1 5.4-.6 7.5.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-dasharray="1 4"/><circle cx="4.6" cy="18.4" r="2.2" fill="currentColor"/><circle cx="19.4" cy="8.2" r="2.6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+          이동 동선 보기
+        </button>
       </section>
 
       <dl class="modal-rows" id="mRows"></dl>
@@ -289,10 +292,37 @@
     <button id="btnPermAsk" type="button">권한 요청</button>
     <button id="btnPermClose" type="button" aria-label="닫기">✕</button>
   </div>
+
+  <!-- 이동 동선 전체 보기 (지도 위 상세 동선) -->
+  <section class="routeview" id="routeView" hidden aria-label="이동 동선 상세">
+    <div class="rv-bar" role="toolbar">
+      <button class="rv-icon" id="rvBack" type="button" aria-label="동선 닫기" title="동선 닫기">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="rv-who">
+        <b id="rvWho">— 님의 이동 동선</b>
+        <span id="rvMeta">—</span>
+      </div>
+      <button class="rv-chip" id="rvTlToggle" type="button" aria-expanded="false" aria-controls="rvTimeline">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6.5h12M8 12h12M8 17.5h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="4.3" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.3" cy="12" r="1.2" fill="currentColor"/><circle cx="4.3" cy="17.5" r="1.2" fill="currentColor"/></svg>
+        <span id="rvTlLabel">타임라인</span>
+      </button>
+      <button class="rv-chip rv-chip--close" id="rvClose" type="button">동선 닫기</button>
+    </div>
+
+    <div class="rv-timeline" id="rvTimeline" hidden>
+      <div class="rv-tl-head">
+        <b>세부 타임라인</b>
+        <span class="rv-tl-count" id="rvTlCount">—</span>
+        <button class="rv-tl-hide" id="rvTlHide" type="button" aria-label="타임라인 접기">✕</button>
+      </div>
+      <ol class="rv-list" id="rvTlList"></ol>
+    </div>
+  </section>
 </main>
 
 <script src="./vendor/leaflet/leaflet.js"></script>
-<script src="./config.js?v=9"></script>
-<script src="./app.js?v=9"></script>
+<script src="./config.js?v=10"></script>
+<script src="./app.js?v=10"></script>
 </body>
 </html>

@@ -255,7 +255,9 @@
     'convoList', 'toast',
     'memberModal', 'mCard', 'mAvatar', 'mName', 'mStatus', 'mRows', 'mEdit', 'mNickInput',
     'mEmojis', 'mStatusInput', 'mCopyCode', 'mClose', 'mChat', 'mSave', 'mLocate', 'mRemove',
-    'mRouteBlock', 'mRouteSum', 'mRouteToggle', 'mTimeline',
+    'mRouteBlock', 'mRouteSum', 'mRouteHint', 'mRouteOpen',
+    'routeView', 'rvBack', 'rvClose', 'rvWho', 'rvMeta', 'rvTlToggle', 'rvTlLabel',
+    'rvTimeline', 'rvTlCount', 'rvTlHide', 'rvTlList',
     'mBatt', 'mBattModes', 'mBattManual', 'mBattRange', 'mBattVal', 'mBattCharging',
     'addModal', 'addForm', 'inputCode', 'btnSendReq', 'myCodeBig', 'btnCopyCode', 'btnCopyLink',
     'outgoingBox', 'outgoingList', 'addClose',
@@ -277,7 +279,10 @@
     markerSig: new Map(),
     routeGroup: null,
     routeFor: null,
-    routeOn: true,
+    routeView: null,       // 상세 동선을 보고 있는 사용자 user_id
+    routeModel: null,      // 현재 그린 동선 모델(핀·타임라인)
+    routeSig: '',          // 다시 그릴 필요가 있는지 비교용
+    routeTlOpen: false,    // 상세 타임라인 열림 여부
     liveRoutes: new Map(),
     history: new Map(),
     joined: false,
@@ -297,6 +302,7 @@
     lastFix: null,
     gotFix: false,
     geoDenied: false,
+    geoFallback: false,    // 정밀 위치 실패 → 네트워크 위치로 받은 상태
     toastTimer: null,
     selectedEmoji: null,
     feedReq: null,
@@ -714,6 +720,7 @@
     renderConvos();
     updateChrome();
     syncLiveRoutes();
+    refreshRouteView();
   }
 
   function renderTimes() {
@@ -799,6 +806,15 @@
   function renderPins() {
     if (!state.map) return;
     const seen = new Set();
+
+    if (state.routeView) {
+      for (const [id, marker] of Array.from(state.markers.entries())) {
+        marker.remove();
+        state.markers.delete(id);
+        state.markerSig.delete(id);
+      }
+      return;
+    }
 
     for (const m of allPeople()) {
       if (!isFinite(m.lat) || !isFinite(m.lng) || m.lat == null) continue;
@@ -978,70 +994,447 @@
 
   function clearRoute() {
     state.routeFor = null;
+    state.routeModel = null;
     if (state.routeGroup) state.routeGroup.clearLayers();
     syncLiveRoutes();
   }
 
-  function stayBadgeIcon(mins, color) {
-    const html = '<div class="stay-badge" style="--c:' + esc(color) + '">'
-      + '<span class="stay-dot"></span>' + esc(durText(mins * 60000)) + '</div>';
-    return L.divIcon({ className: 'stay-badge-host', html, iconSize: [1, 1], iconAnchor: [0, 0] });
+  /* ── 상세 동선 모델: 핀(출발·체류·현재)과 타임라인 줄을 함께 만든다 ── */
+  function routeModel(pts) {
+    const segs = buildSegments(pts);
+    if (!segs.length) return null;
+
+    const stays = segs.filter((s) => s.kind === 'stay');
+    const moves = segs.filter((s) => s.kind === 'move');
+    const meters = moves.reduce((a, s) => a + s.meters, 0);
+    const startT = pts[0].t;
+    const endT = pts[pts.length - 1].t;
+    const spanMs = Math.max(1, endT - startT);
+    const kmh = meters / 1000 / Math.max(0.01, spanMs / 3600000);
+
+    const firstStay = stays[0] || null;
+    const lastStay = stays[stays.length - 1] || null;
+    const startIsStay = !!firstStay && firstStay.start === startT;
+    const endIsStay = !!lastStay && lastStay.end === endT;
+
+    const pins = [];
+    stays.forEach((s, i) => {
+      pins.push({
+        key: 's' + i, kind: 'stay', num: i + 1, lat: s.lat, lng: s.lng,
+        start: s.start, end: s.end, ms: s.ms,
+        first: i === 0 && startIsStay,
+        last: i === stays.length - 1 && endIsStay,
+      });
+    });
+
+    if (!startIsStay) {
+      pins.push({ key: 'start', kind: 'start', num: 0, lat: pts[0].lat, lng: pts[0].lng, start: startT, end: startT, ms: 0, first: true, last: false });
+    }
+    if (!endIsStay) {
+      const last = pts[pts.length - 1];
+      pins.push({ key: 'now', kind: 'now', num: 0, lat: last.lat, lng: last.lng, start: endT, end: endT, ms: 0, first: false, last: true });
+    }
+
+    const rows = segs.map((s, i) => {
+      if (s.kind === 'stay') {
+        const pin = pins.find((p) => p.kind === 'stay' && p.start === s.start);
+        return { key: 'r' + i, kind: 'stay', seg: s, pinKey: pin ? pin.key : '', start: s.start, end: s.end, ms: s.ms, meters: 0, kmh: 0 };
+      }
+      return { key: 'r' + i, kind: 'move', seg: s, pinKey: '', start: s.start, end: s.end, ms: s.ms, meters: s.meters, kmh: s.kmh };
+    });
+
+    return { pts, segs, stays, moves, meters, spanMs, kmh, pins, rows, startT, endT, startIsStay, endIsStay };
   }
 
-  function drawRoute(m, opts = {}) {
-    if (!state.map || !m) return;
-    const pts = historyFor(m.user_id);
-    if (state.routeGroup) state.routeGroup.clearLayers();
-    state.routeFor = m.user_id;
-    dropLiveRoute(m.user_id);
+  function hhmm(t) {
+    return clockOf(new Date(t).toISOString());
+  }
 
-    if (pts.length < 2) return;
+  function pinByKey(key) {
+    const model = state.routeModel;
+    if (!model) return null;
+    return model.pins.find((p) => p.key === key) || null;
+  }
+
+  function nextMoveAfter(seg, model) {
+    const i = model.segs.indexOf(seg);
+    for (let j = i + 1; j < model.segs.length; j++) {
+      if (model.segs[j].kind === 'move') return model.segs[j];
+    }
+    return null;
+  }
+
+  /* ── 상세 동선: 선 · 방향 화살표 · 출발/체류/현재 핀 ── */
+  function bearingDeg(a, b) {
+    const la1 = a[0] * Math.PI / 180;
+    const la2 = b[0] * Math.PI / 180;
+    const dLo = (b[1] - a[1]) * Math.PI / 180;
+    const y = Math.sin(dLo) * Math.cos(la2);
+    const x = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dLo);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+
+  function arrowsAlong(coords) {
+    const lens = [];
+    let total = 0;
+    for (let i = 1; i < coords.length; i++) {
+      const d = haversine({ lat: coords[i - 1][0], lng: coords[i - 1][1] }, { lat: coords[i][0], lng: coords[i][1] });
+      lens.push(d);
+      total += d;
+    }
+    if (total < 45) return [];
+
+    const count = Math.max(1, Math.min(7, Math.round(total / 800)));
+    const step = total / (count + 1);
+    const out = [];
+    let acc = 0;
+    let target = step;
+
+    for (let i = 0; i < lens.length && out.length < count; i++) {
+      const d = lens[i];
+      while (target <= acc + d && out.length < count) {
+        const f = d > 0 ? (target - acc) / d : 0;
+        const a = coords[i];
+        const b = coords[i + 1];
+        out.push({
+          lat: a[0] + (b[0] - a[0]) * f,
+          lng: a[1] + (b[1] - a[1]) * f,
+          deg: bearingDeg(a, b),
+        });
+        target += step;
+      }
+      acc += d;
+    }
+    return out;
+  }
+
+  function routePinIcon(pin, m, color) {
+    let inner = '';
+    if (pin.kind === 'stay') {
+      inner = '<span class="rv-pin-num">' + pin.num + '</span>'
+        + '<span class="rv-pin-txt">' + esc(durText(pin.ms)) + '</span>';
+      if (pin.first) inner += '<span class="rv-pin-tag">출발</span>';
+      if (pin.last) inner += '<span class="rv-pin-tag rv-pin-tag--now">지금</span>';
+    } else if (pin.kind === 'start') {
+      inner = '<span class="rv-pin-dot"></span>'
+        + '<span class="rv-pin-txt"><b>출발</b> ' + esc(hhmm(pin.start)) + '</span>';
+    } else {
+      const fresh = Date.now() - pin.start < 15 * 60 * 1000;
+      inner = '<span class="rv-pin-dot"></span>'
+        + '<span class="rv-pin-txt"><b>' + (fresh ? '현재' : '최근') + '</b> ' + esc(hhmm(pin.start)) + '</span>';
+    }
+
+    const html = '<div class="rv-pin rv-pin--' + pin.kind + '" style="--c:' + esc(color) + '">' + inner + '</div>';
+    return L.divIcon({ className: 'rv-pin-host', html, iconSize: [1, 1], iconAnchor: [0, 0] });
+  }
+
+  function popupRows(rows) {
+    return '<dl>' + rows.map((r) =>
+      '<div><dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd></div>'
+    ).join('') + '</dl>';
+  }
+
+  function stayPopupHTML(pin, model) {
+    const seg = model.segs.find((s) => s.kind === 'stay' && s.start === pin.start);
+    const next = seg ? nextMoveAfter(seg, model) : null;
+    const title = pin.first ? '출발한 자리' : (pin.last ? '지금 머무는 곳' : '머문 곳 ' + pin.num);
+    const rows = [
+      ['머문 시간', durText(pin.ms)],
+      ['시각', hhmm(pin.start) + ' ~ ' + hhmm(pin.end)],
+    ];
+    if (next) {
+      rows.push(['다음 이동', distText(next.meters) + ' · ' + durText(next.ms) + (next.kmh >= MOVE_KMH ? ' · ' + Math.round(next.kmh) + 'km/h' : '')]);
+    }
+    return '<div class="rv-pop-k">' + esc(title) + '</div>'
+      + '<div class="rv-pop-t">' + esc(hhmm(pin.start)) + ' ~ ' + esc(hhmm(pin.end)) + '</div>'
+      + popupRows(rows);
+  }
+
+  function edgePopupHTML(pin, model, m) {
+    const isStart = pin.kind === 'start';
+    const seg = model.segs[0];
+    const rows = [['시각', hhmm(pin.start)]];
+    if (isStart && seg && seg.kind === 'move') {
+      rows.push(['첫 이동', distText(seg.meters) + ' · ' + durText(seg.ms) + (seg.kmh >= MOVE_KMH ? ' · ' + Math.round(seg.kmh) + 'km/h' : '')]);
+    }
+    if (!isStart) {
+      const acc = m.accuracy != null && isFinite(m.accuracy) ? '±' + Math.round(m.accuracy) + 'm' : null;
+      rows.push(['최근 갱신', m.updated_at ? timeAgo(m.updated_at) + ' · ' + clockOf(m.updated_at) : '—']);
+      if (acc) rows.push(['위치 정확도', acc]);
+    }
+    return '<div class="rv-pop-k">' + (isStart ? '출발 지점' : '최근 · 현재 위치') + '</div>'
+      + '<div class="rv-pop-t">' + esc(hhmm(pin.start)) + '</div>'
+      + popupRows(rows)
+      + '<p class="rv-pop-note">' + (isStart ? '이 자리에서 이동 기록이 시작됐어요.' : '지도 위 마지막으로 기록된 자리예요.') + '</p>';
+  }
+
+  function movePopupHTML(seg) {
+    const kind = moveKind(seg.kmh);
+    return '<div class="rv-pop-k">이동 구간</div>'
+      + '<div class="rv-pop-t">' + esc(distText(seg.meters)) + ' · ' + esc(durText(seg.ms)) + '</div>'
+      + popupRows([
+        ['시각', hhmm(seg.start) + ' ~ ' + hhmm(seg.end)],
+        ['평균 속도', (kind ? kind.ico + ' ' : '') + Math.max(1, Math.round(seg.kmh)) + 'km/h' + (kind ? ' · ' + kind.label : '')],
+      ]);
+  }
+
+  function popupOpts() {
+    return { className: 'rv-pop', maxWidth: 268, autoPanPaddingTopLeft: [24, 104], autoPanPaddingBottomRight: [24, 110] };
+  }
+
+  function routeFitPadding() {
+    const size = state.map ? state.map.getSize() : { x: 360, y: 640 };
+    const top = 104;
+    let bottom = 92;
+    if (state.routeTlOpen && el.rvTimeline && !el.rvTimeline.hidden) {
+      bottom = el.rvTimeline.getBoundingClientRect().height + 36;
+    }
+    return {
+      paddingTopLeft: [34, top],
+      paddingBottomRight: [34, Math.min(bottom, Math.max(70, size.y - top - 90))],
+    };
+  }
+
+  function fitRoute(model) {
+    if (!state.map || !model || !model.pts.length) return;
+    state.map.fitBounds(L.latLngBounds(model.pts.map((p) => [p.lat, p.lng])), Object.assign({
+      maxZoom: 16, animate: true, duration: 0.45,
+    }, routeFitPadding()));
+  }
+
+  function focusLatLng(lat, lng, zoom) {
+    if (!state.map) return;
+    const z = Math.max(state.map.getZoom(), zoom || 15);
+    const p = state.map.project([lat, lng], z);
+    const top = 110;
+    const bottom = (state.routeTlOpen && el.rvTimeline && !el.rvTimeline.hidden)
+      ? el.rvTimeline.getBoundingClientRect().height + 30 : 86;
+    const dy = Math.max(0, (bottom - top) / 2);
+    const center = state.map.unproject(p.add([0, dy]), z);
+    state.map.flyTo(center, z, { duration: 0.5 });
+  }
+
+  function drawRouteDetail(m, opts = {}) {
+    if (!state.map || !m) return null;
+    const pts = historyFor(m.user_id);
+    const model = routeModel(pts);
+    if (state.routeGroup) state.routeGroup.clearLayers();
+    if (!model) { state.routeModel = null; return null; }
 
     const color = m.color || colorFor(m.user_id);
     const coords = pts.map((p) => [p.lat, p.lng]);
 
-    L.polyline(coords, {
-      color: '#ffffff', weight: 7, opacity: 0.85, lineJoin: 'round', lineCap: 'round',
-    }).addTo(state.routeGroup);
+    if (coords.length > 1) {
+      L.polyline(coords, {
+        color: '#ffffff', weight: 9, opacity: 0.9, lineJoin: 'round', lineCap: 'round', interactive: false,
+      }).addTo(state.routeGroup);
+      L.polyline(coords, {
+        color, weight: 5, opacity: 0.96, lineJoin: 'round', lineCap: 'round', interactive: false,
+      }).addTo(state.routeGroup);
+    }
 
-    L.polyline(coords, {
-      color, weight: 4, opacity: 0.95, lineJoin: 'round', lineCap: 'round',
-    }).addTo(state.routeGroup);
-
-    const segs = buildSegments(pts);
-    segs.filter((s) => s.kind === 'stay').forEach((s) => {
-      if (m.speed_kmh == null || m.speed_kmh < MOVE_KMH) {
-        if (m.lat != null && haversine({ lat: m.lat, lng: m.lng }, { lat: s.lat, lng: s.lng }) < 30) return;
-      }
-      L.marker([s.lat, s.lng], {
-        icon: stayBadgeIcon(Math.round(s.ms / 60000), color),
-        keyboard: false,
-        interactive: false,
-        zIndexOffset: -300,
+    arrowsAlong(coords).forEach((a) => {
+      L.marker([a.lat, a.lng], {
+        icon: L.divIcon({
+          className: 'rv-arrow-host',
+          html: '<div class="rv-arrow" style="--a:' + (a.deg - 90).toFixed(1) + 'deg;--c:' + esc(color) + '">'
+            + '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4.5 17 12l-9 7.5" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>',
+          iconSize: [1, 1], iconAnchor: [0, 0],
+        }),
+        keyboard: false, interactive: false, zIndexOffset: 200,
       }).addTo(state.routeGroup);
     });
 
-    L.circleMarker(coords[0], {
-      radius: 4, color: '#ffffff', weight: 2, fillColor: color, fillOpacity: 1, interactive: false,
-    }).addTo(state.routeGroup);
+    model.pins.forEach((pin) => {
+      const marker = L.marker([pin.lat, pin.lng], {
+        icon: routePinIcon(pin, m, color),
+        keyboard: false,
+        riseOnHover: true,
+        zIndexOffset: pin.kind === 'now' ? 700 : (pin.kind === 'start' ? 500 : 400),
+      });
+      marker.bindPopup(pin.kind === 'stay' ? stayPopupHTML(pin, model) : edgePopupHTML(pin, model, m), popupOpts());
+      marker.addTo(state.routeGroup);
+      pin.marker = marker;
+    });
 
-    if (opts.fit !== false) {
-      setTimeout(() => {
-        if (!state.map) return;
-        const size = state.map.getSize();
-        const cardTop = (el.memberModal && !el.memberModal.hidden && el.mCard)
-          ? el.mCard.getBoundingClientRect().top
-          : (el.sheet ? el.sheet.getBoundingClientRect().top : size.y);
-        const covered = Math.max(0, Math.round(size.y - cardTop)) + 14;
-        const bottom = Math.min(covered, Math.max(120, size.y - 190));
-        state.map.fitBounds(L.latLngBounds(coords), {
-          paddingTopLeft: [46, 92],
-          paddingBottomRight: [46, bottom],
-          maxZoom: 16,
-          animate: true,
-        });
-      }, 340);
+    state.routeModel = model;
+    if (opts.fit !== false) fitRoute(model);
+    return model;
+  }
+
+  function routeSigOf(m) {
+    const pts = historyFor(m.user_id);
+    const last = pts[pts.length - 1];
+    return [pts.length, last ? last.t : 0, m.lat, m.lng, m.updated_at || ''].join('|');
+  }
+
+  function renderRouteBar(m, model) {
+    if (!el.rvWho) return;
+    el.rvWho.textContent = m.nickname + ' 님의 이동 동선';
+    const bits = [model.pins.length + '개 지점', '총 ' + distText(model.meters), durText(model.spanMs) + ' 기록'];
+    if (model.startT) bits.push(hhmm(model.startT) + '~' + hhmm(model.endT));
+    el.rvMeta.textContent = bits.join(' · ');
+    el.rvTlCount.textContent = model.rows.length + '개 구간';
+  }
+
+  function routeRowHTML(row, model, color) {
+    const t = hhmm(row.start) + ' ~ ' + hhmm(row.end);
+    if (row.kind === 'stay') {
+      const pin = model.pins.find((p) => p.key === row.pinKey);
+      return '<li><button type="button" class="rv-row rv-row--stay" data-row="' + esc(row.key) + '">'
+        + '<span class="rv-row-num" style="--c:' + esc(color) + '">' + (pin ? pin.num : '·') + '</span>'
+        + '<span class="rv-row-body"><b>' + esc(durText(row.ms)) + ' 머묾</b><span>' + esc(t) + '</span></span>'
+        + '<span class="rv-row-go">핀</span></button></li>';
     }
+    const kind = moveKind(row.kmh);
+    return '<li><button type="button" class="rv-row rv-row--move" data-row="' + esc(row.key) + '">'
+      + '<span class="rv-row-ico">' + (kind ? kind.ico : '🚶') + '</span>'
+      + '<span class="rv-row-body"><b>이동 ' + esc(distText(row.meters)) + '</b><span>' + esc(t) + ' · ' + esc(durText(row.ms)) + ' · ' + Math.max(1, Math.round(row.kmh)) + 'km/h</span></span>'
+      + '<span class="rv-row-go">구간</span></button></li>';
+  }
+
+  function renderRouteTimeline(model) {
+    if (!el.rvTlList || !model) return;
+    const m = state.routeView ? personById(state.routeView) : null;
+    const color = m ? (m.color || colorFor(m.user_id)) : '#0fb9a3';
+    el.rvTlList.innerHTML = model.rows.map((r) => routeRowHTML(r, model, color)).join('')
+      || '<li class="rv-empty">아직 나눌 구간이 없어요.</li>';
+    el.rvTlCount.textContent = model.rows.length + '개 구간';
+  }
+
+  function renderRouteBlock(m) {
+    const pts = historyFor(m.user_id);
+    const model = pts.length >= 2 ? routeModel(pts) : null;
+
+    if (!model) {
+      el.mRouteSum.textContent = pts.length
+        ? '이동 기록이 아직 짧아요 — 위치가 두 번 이상 갱신되면 동선이 그려져요.'
+        : '아직 이동 기록이 없어요 — 위치가 갱신되면 자동으로 쌓여요.';
+      el.mRouteHint.textContent = '';
+      el.mRouteOpen.disabled = true;
+      return;
+    }
+
+    el.mRouteSum.textContent = '최근 ' + durText(model.spanMs) + ' · ' + model.pins.length + '개 지점 · 총 ' + distText(model.meters)
+      + (model.stays.length ? ' · 머문 곳 ' + model.stays.length + '곳' : '');
+    el.mRouteHint.textContent = hhmm(model.startT) + '~' + hhmm(model.endT);
+    el.mRouteOpen.disabled = false;
+  }
+
+  function closeRouteView() {
+    if (!state.routeView) return;
+    state.routeView = null;
+    state.routeFor = null;
+    state.routeModel = null;
+    state.routeSig = '';
+    state.routeTlOpen = false;
+    el.routeView.hidden = true;
+    el.rvTimeline.hidden = true;
+    el.app.classList.remove('is-route');
+    if (state.routeGroup) state.routeGroup.clearLayers();
+    if (state.map) {
+      try { state.map.closePopup(); } catch (e) {}
+    }
+    renderPins();
+    syncLiveRoutes();
+  }
+
+  function openRouteView(id) {
+    const m = personById(id);
+    if (!m || !state.map) return;
+    const pts = historyFor(m.user_id);
+    const model = pts.length >= 2 ? routeModel(pts) : null;
+    if (!model) {
+      toast('아직 이동 기록이 짧아 동선을 그릴 수 없어요', 2600);
+      return;
+    }
+
+    if (!el.memberModal.hidden) {
+      el.memberModal.hidden = true;
+      modalUser = null;
+      state.selected = null;
+    }
+
+    state.routeView = m.user_id;
+    state.routeFor = m.user_id;
+    state.routeSig = '';
+    state.routeTlOpen = false;
+    el.routeView.hidden = false;
+    el.app.classList.add('is-route');
+    el.rvTimeline.hidden = true;
+    el.rvTlToggle.classList.remove('is-on');
+    el.rvTlToggle.setAttribute('aria-expanded', 'false');
+    el.rvTlLabel.textContent = '타임라인';
+
+    renderRouteBar(m, model);
+    renderRouteTimeline(model);
+    dropLiveRoute(m.user_id);
+    renderPins();
+    syncLiveRoutes();
+
+    setTimeout(() => {
+      if (state.routeView !== m.user_id) return;
+      state.map.invalidateSize();
+      const drawn = drawRouteDetail(m, { fit: true });
+      if (drawn) {
+        renderRouteBar(m, drawn);
+        renderRouteTimeline(drawn);
+        state.routeSig = routeSigOf(m);
+      }
+    }, 70);
+  }
+
+  function setRouteTimeline(open) {
+    state.routeTlOpen = !!open;
+    el.rvTimeline.hidden = !state.routeTlOpen;
+    el.rvTlToggle.classList.toggle('is-on', state.routeTlOpen);
+    el.rvTlToggle.setAttribute('aria-expanded', String(state.routeTlOpen));
+    el.rvTlLabel.textContent = state.routeTlOpen ? '타임라인 닫기' : '타임라인';
+    if (state.routeModel) {
+      setTimeout(() => { if (state.routeView) fitRoute(state.routeModel); }, 40);
+    }
+  }
+
+  function focusRouteRow(key) {
+    const model = state.routeModel;
+    if (!model || !state.map) return;
+    const row = model.rows.find((r) => r.key === key);
+    if (!row) return;
+
+    $$('.rv-row', el.rvTlList).forEach((b) => b.classList.toggle('is-active', b.getAttribute('data-row') === key));
+
+    if (row.kind === 'stay') {
+      const pin = pinByKey(row.pinKey);
+      if (!pin) return;
+      focusLatLng(pin.lat, pin.lng, 15.5);
+      if (pin.marker) setTimeout(() => { try { pin.marker.openPopup(); } catch (e) {} }, 320);
+      return;
+    }
+
+    const s = row.seg;
+    const bounds = L.latLngBounds([[s.from.lat, s.from.lng], [s.to.lat, s.to.lng]]);
+    state.map.flyToBounds(bounds, Object.assign({ maxZoom: 16, animate: true, duration: 0.5 }, routeFitPadding()));
+    const mid = [(s.from.lat + s.to.lat) / 2, (s.from.lng + s.to.lng) / 2];
+    setTimeout(() => {
+      if (!state.routeView) return;
+      L.popup(popupOpts()).setLatLng(mid).setContent(movePopupHTML(s)).openOn(state.map);
+    }, 320);
+  }
+
+  function refreshRouteView() {
+    if (!state.routeView || !state.map) return;
+    const m = personById(state.routeView);
+    if (!m) { closeRouteView(); return; }
+    const sig = routeSigOf(m);
+    if (sig === state.routeSig) return;
+    state.routeSig = sig;
+
+    const model = drawRouteDetail(m, { fit: false });
+    if (!model) { closeRouteView(); toast('동선 기록이 사라졌어요', 2400); return; }
+    renderRouteBar(m, model);
+    const scroll = el.rvTlList ? el.rvTlList.scrollTop : 0;
+    renderRouteTimeline(model);
+    if (el.rvTlList) el.rvTlList.scrollTop = scroll;
   }
 
   const LIVE_TRAIL_MS = 30 * 60 * 1000;
@@ -1123,51 +1516,6 @@
     return '<span class="muted">측정 불가</span>';
   }
 
-  function timelineHTML(segs) {
-    if (!segs.length) return '';
-    const recent = segs.slice(-5);
-    const last = recent.length;
-    return recent.map((s, i) => {
-      const isLast = i === last - 1;
-      if (s.kind === 'stay') {
-        return '<li class="tl tl--stay' + (isLast ? ' is-now' : '') + '">'
-          + '<span class="tl-dot"></span>'
-          + '<span class="tl-body"><b>' + esc(durText(s.ms)) + ' 머무름</b>'
-          + '<span>' + esc(clockOf(new Date(s.start).toISOString())) + ' ~ '
-          + esc(clockOf(new Date(s.end).toISOString()))
-          + (isLast ? ' · 지금' : '') + '</span></span></li>';
-      }
-      return '<li class="tl tl--move' + (isLast ? ' is-now' : '') + '">'
-        + '<span class="tl-dot"></span>'
-        + '<span class="tl-body"><b>이동 ' + esc(distText(s.meters)) + '</b>'
-        + '<span>' + esc(durText(s.ms)) + ' · '
-        + esc(moveKind(s.kmh) ? moveKind(s.kmh).ico + ' ' : '') + esc(Math.max(1, Math.round(s.kmh))) + 'km/h'
-        + (isLast ? ' · 지금' : '') + '</span></span></li>';
-    }).join('');
-  }
-
-  function renderRouteBlock(m) {
-    const pts = historyFor(m.user_id);
-    const segs = buildSegments(pts);
-
-    if (pts.length < 2) {
-      el.mRouteSum.textContent = '아직 이동 기록이 없어요 — 위치가 갱신되면 자동으로 쌓여요.';
-      el.mTimeline.innerHTML = '';
-      el.mRouteToggle.disabled = true;
-      el.mRouteToggle.classList.remove('is-on');
-      return;
-    }
-
-    const sum = routeSummary(segs);
-    el.mRouteSum.textContent = sum
-      ? '최근 ' + durText(sum.spanMs) + ' · 이동 ' + distText(sum.meters) + ' · 머문 곳 ' + sum.stays + '곳'
-      : '이동 기록을 정리 중이에요';
-    el.mTimeline.innerHTML = timelineHTML(segs);
-    el.mRouteToggle.disabled = false;
-    el.mRouteToggle.classList.toggle('is-on', state.routeOn);
-    el.mRouteToggle.textContent = state.routeOn ? '경로 숨기기' : '경로 보기';
-  }
-
   function renderRows(m, isMe) {
     const rows = [];
     rows.push(modalRow('speed', '이동 속도', esc(speedLong(m))));
@@ -1200,7 +1548,6 @@
     const isMe = m.user_id === state.me.user_id;
     modalUser = m.user_id;
     state.selected = id;
-    state.routeOn = true;
     renderPins();
 
     el.mAvatar.textContent = initialOf(m.nickname);
@@ -1239,8 +1586,7 @@
     const fresh = personById(id) || m;
     renderRows(fresh, isMe);
     renderRouteBlock(fresh);
-    if (state.routeOn) drawRoute(fresh);
-    else clearRoute();
+    clearRoute();
   }
 
   function closeModal() {
@@ -1756,30 +2102,73 @@
     }
   }
 
+  /* 정밀 위치(enableHighAccuracy)가 실패하면 네트워크 위치로 한 번 더 시도한다.
+     PC 와이파이·실내처럼 GPS 가 없는 환경에서도 위치가 잡히게. */
+  const GEO_FINE = { enableHighAccuracy: true, timeout: 9000, maximumAge: 3000 };
+  const GEO_COARSE = { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 };
+
+  function getPosition(onOk, onErr, opts = {}) {
+    if (!navigator.geolocation) {
+      onErr({ code: 0, message: 'geolocation unsupported' });
+      return;
+    }
+    const fine = Object.assign({}, GEO_FINE, opts);
+    const coarse = Object.assign({}, GEO_COARSE, { maximumAge: opts.maximumAge != null ? opts.maximumAge : GEO_COARSE.maximumAge, timeout: GEO_COARSE.timeout });
+
+    try {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => { state.geoFallback = false; onOk(pos); },
+        (err) => {
+          const retryable = err && (err.code === 2 || err.code === 3);
+          if (!retryable) { onErr(err); return; }
+          try {
+            navigator.geolocation.getCurrentPosition(
+              (pos) => { state.geoFallback = true; onOk(pos); },
+              (err2) => onErr(err2),
+              coarse
+            );
+          } catch (e) { onErr(err); }
+        },
+        fine
+      );
+    } catch (e) { onErr(e); }
+  }
+
   function askLocation(opts = {}) {
     if (!navigator.geolocation) {
       if (!opts.silent) toast('이 브라우저는 위치 기능을 지원하지 않아요', 3000);
       return;
     }
-    try {
-      navigator.geolocation.getCurrentPosition(
-        onPosition,
-        (err) => onGeoError(err, !!opts.silent),
-        { enableHighAccuracy: true, timeout: 9000, maximumAge: 3000 }
-      );
-    } catch (e) {
-      onGeoError(e, !!opts.silent);
-    }
+    getPosition(
+      onPosition,
+      (err) => onGeoError(err, !!opts.silent),
+      { enableHighAccuracy: true, timeout: 9000, maximumAge: 3000 }
+    );
   }
 
   function startWatch() {
     stopWatch();
     if (!navigator.geolocation) return;
+    startWatchPass(false);
+  }
+
+  function startWatchPass(coarse) {
     try {
       state.watchId = navigator.geolocation.watchPosition(
-        onPosition,
-        (err) => onGeoError(err, true),
-        { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
+        (pos) => { state.geoFallback = coarse; onPosition(pos); },
+        (err) => {
+          const retryable = err && (err.code === 2 || err.code === 3);
+          if (retryable && !coarse) {
+            // 정밀 위치가 이 환경에서 안 잡힌다 → 네트워크 위치로 다시 감시 시작
+            stopWatch();
+            startWatchPass(true);
+            return;
+          }
+          onGeoError(err, true);
+        },
+        coarse
+          ? { enableHighAccuracy: false, timeout: 20000, maximumAge: 60000 }
+          : { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
       );
     } catch (e) { state.watchId = null; }
   }
@@ -1857,7 +2246,7 @@
       return;
     }
 
-    navigator.geolocation.getCurrentPosition(
+    getPosition(
       async (pos) => {
         onPosition(pos);
         await publishMe(false);
@@ -1865,7 +2254,8 @@
         const sp = state.me.speed_kmh;
         toast('내 위치를 업데이트했어요'
           + (sp != null && sp >= MOVE_KMH ? ' · ' + Math.round(sp) + 'km/h' : '')
-          + (pos.coords.accuracy ? ' · 정확도 ±' + Math.round(pos.coords.accuracy) + 'm' : ''), 2200);
+          + (pos.coords.accuracy ? ' · 정확도 ±' + Math.round(pos.coords.accuracy) + 'm' : '')
+          + (state.geoFallback ? ' · 네트워크 위치' : ''), 2400);
         done();
       },
       async (err) => {
@@ -2105,9 +2495,9 @@
     }
     await refreshFeed();
     renderTimes();
-    if (modalUser && !el.memberModal.hidden && state.routeOn && state.routeFor === modalUser) {
-      drawRoute(personById(modalUser), { fit: false });
-    }
+    if (state.routeView) refreshRouteView();
+    const opened = modalUser && !el.memberModal.hidden ? personById(modalUser) : null;
+    if (opened) renderRouteBlock(opened);
     if (state.chatWith && !el.chatPanel.hidden) {
       renderChatSub();
       loadMessages(state.chatWith, { full: false });
@@ -2250,6 +2640,7 @@
       if (e.key !== 'Escape') return;
       if (!el.addModal.hidden) { closeAddModal(); return; }
       if (!el.chatPanel.hidden) { closeChat(); return; }
+      if (state.routeView) { closeRouteView(); return; }
       if (!el.memberModal.hidden) closeModal();
     });
 
@@ -2277,13 +2668,17 @@
     });
     el.mCopyCode.addEventListener('click', copyMyCode);
 
-    el.mRouteToggle.addEventListener('click', () => {
-      const m = personById(modalUser);
-      if (!m) return;
-      state.routeOn = !state.routeOn;
-      renderRouteBlock(m);
-      if (state.routeOn) drawRoute(m);
-      else clearRoute();
+    el.mRouteOpen.addEventListener('click', () => {
+      const id = modalUser;
+      if (id) openRouteView(id);
+    });
+    el.rvClose.addEventListener('click', closeRouteView);
+    el.rvBack.addEventListener('click', closeRouteView);
+    el.rvTlToggle.addEventListener('click', () => setRouteTimeline(!state.routeTlOpen));
+    el.rvTlHide.addEventListener('click', () => setRouteTimeline(false));
+    el.rvTlList.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-row]');
+      if (btn) focusRouteRow(btn.getAttribute('data-row'));
     });
 
     el.mBattModes.addEventListener('click', (e) => {
@@ -2346,8 +2741,13 @@
       resizeTimer = setTimeout(() => {
         if (!state.joined || !state.map) return;
         state.map.invalidateSize();
-        if (el.memberModal.hidden) fitToPeople(false);
-        else if (state.routeFor && state.routeOn) drawRoute(personById(state.routeFor));
+        if (state.routeView) {
+          const m = personById(state.routeView);
+          if (m) {
+            const model = drawRouteDetail(m, { fit: true });
+            if (model) { renderRouteBar(m, model); renderRouteTimeline(model); }
+          }
+        } else if (el.memberModal.hidden) fitToPeople(false);
       }, 260);
     });
   }
