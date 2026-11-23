@@ -229,6 +229,37 @@ begin
   );
 end $$;
 
+-- 자동 로그인 복구: 세션 토큰 하나로 다시 로그인한다(앱을 다시 열었을 때)
+create or replace function public.auth_login_session(p_token text)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  sess public.auth_sessions;
+  prof public.friend_profiles;
+begin
+  if p_token is null or char_length(p_token) < 32 then
+    raise exception 'unauthorized';
+  end if;
+
+  select * into sess from public.auth_sessions
+   where token = p_token and expires_at > now();
+  if sess.token is null then
+    raise exception 'unauthorized';
+  end if;
+
+  select * into prof from public.friend_profiles where user_id = sess.user_id;
+  if prof.user_id is null then
+    raise exception 'unauthorized';
+  end if;
+
+  update public.auth_sessions set last_seen_at = now() where token = p_token;
+
+  return jsonb_build_object(
+    'profile', public._urikkiri_profile_json(prof),
+    'session_token', sess.token,
+    'expires_at', sess.expires_at
+  );
+end $$;
+
 -- 로그아웃: 지금 쓰는 세션 토큰만 폐기
 create or replace function public.auth_logout(p_user text, p_secret text)
 returns jsonb language plpgsql security definer set search_path = public as $$
@@ -259,5 +290,6 @@ $$;
 grant execute on function public.auth_register(text, text, text, text, text) to anon, authenticated;
 grant execute on function public.auth_link_existing(text, text, text, text)  to anon, authenticated;
 grant execute on function public.auth_login(text, text)                      to anon, authenticated;
+grant execute on function public.auth_login_session(text)                    to anon, authenticated;
 grant execute on function public.auth_logout(text, text)                     to anon, authenticated;
 grant execute on function public.auth_username_state(text)                   to anon, authenticated;

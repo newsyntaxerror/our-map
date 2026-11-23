@@ -24,7 +24,7 @@
 <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <link rel="stylesheet" href="./vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="./styles.css?v=16">
+<link rel="stylesheet" href="./styles.css?v=17">
 <script>
   /* 화면 확인용: 콘솔 에러를 남겨 두면 개발자도구 없이도 읽을 수 있습니다. */
   window.__ERRORS__ = [];
@@ -74,6 +74,10 @@
           <input id="loginPw" class="field-input" type="password" maxlength="72" placeholder="비밀번호"
                  autocomplete="current-password" enterkeyhint="go">
         </label>
+        <label class="check-row" for="loginAuto">
+          <input type="checkbox" class="auto-login" id="loginAuto" checked>
+          <span>자동 로그인 <em>앱을 다시 열어도 로그인 상태를 기억해요</em></span>
+        </label>
         <p class="auth-msg" id="loginMsg" hidden></p>
         <button class="btn btn--primary" id="btnLogin" type="submit">로그인</button>
         <p class="tiny">처음이면 <b>[처음이에요]</b>로 30초 만에 시작할 수 있어요. 다른 기기에서 쓰던 아이디로 들어오면 친구·채팅이 그대로 보여요.</p>
@@ -95,6 +99,10 @@
           <span class="field-label">비밀번호</span>
           <input id="regPw" class="field-input" type="password" maxlength="72" placeholder="4자 이상"
                  autocomplete="new-password" enterkeyhint="go">
+        </label>
+        <label class="check-row" for="regAuto">
+          <input type="checkbox" class="auto-login" id="regAuto" checked>
+          <span>자동 로그인 <em>앱을 다시 열어도 로그인 상태를 기억해요</em></span>
         </label>
         <p class="carry-note" id="carryNote" hidden>
           <b>이 기기에 있던 친구·채팅을 그대로 이어받아요.</b>
@@ -421,7 +429,7 @@
 </main>
 
 <script src="./vendor/leaflet/leaflet.js"></script>
-<script src="./config.js?v=16"></script>
-<script src="./app.js?v=16"></script>
+<script src="./config.js?v=17"></script>
+<script src="./app.js?v=17"></script>
 </body>
 </html>

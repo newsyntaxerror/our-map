@@ -27,9 +27,12 @@
   /* 배터리 API는 안드로이드 크롬 등에서만 열려 있어요(iOS 사파리는 막혀 있음). */
   const BATT_API = typeof navigator !== 'undefined' && typeof navigator.getBattery === 'function';
 
-  /* 체류·속도 규칙 */
-  const STAY_RADIUS_M = 75;             // 같은 장소로 보는 반경
-  const STAY_MIN_MS = 3 * 60 * 1000;    // 이 시간 이상 머물면 '체류'로 기록
+  /* 체류·속도 규칙 — 한 지점에 5분 이상 머물면 '머문 곳'으로 끊는다(사용자 지정) */
+  const STAY_RADIUS_M = 60;             // 같은 장소로 보는 반경(50~75m 사이)
+  const STAY_MIN_MS = 5 * 60 * 1000;    // 이 시간 이상 머물면 '체류'로 기록
+  const STAY_SAMPLE_MS = 60 * 1000;     // 머무는 동안 남기는 기록 간격(시작·종료 시각 보존)
+  const STAY_LONG_SAMPLE_MS = 5 * 60 * 1000;  // 오래 머물 때(10분 이후) 기록 간격
+  const STAY_GAP_MAX_MS = 30 * 60 * 1000;     // 기록 사이가 이보다 벌어지면 다른 체류로 본다
   const MOVE_KMH = 2;                   // 이 속도 이상이면 '이동 중'
   const HISTORY_MAX = 240;
   const HISTORY_MAX_MS = 6 * 60 * 60 * 1000;
@@ -66,6 +69,67 @@
       const secure = location.protocol === 'https:' ? '; Secure' : '';
       document.cookie = SESS_COOKIE + '=; path=/; max-age=0; SameSite=Lax' + secure;
     } catch (e) {}
+  }
+
+  /* ── 세 번째 저장소: IndexedDB ──
+     iOS 사파리·홈 화면 앱은 localStorage 를 비워 버릴 때가 있어,
+     로그인 열쇠를 IndexedDB 에도 남겨 '자동 로그인'을 되살립니다. */
+  const IDB_NAME = 'urikkiri-auth';
+  const IDB_STORE = 'session';
+  const SESS_KEY = 'urikkiri.session.v1';
+  const AUTO_KEY = 'urikkiri.autoLogin';
+  let idbPromise = null;
+
+  function idbOpen() {
+    if (idbPromise) return idbPromise;
+    idbPromise = new Promise((resolve) => {
+      try {
+        if (typeof indexedDB === 'undefined') { resolve(null); return; }
+        const req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+        req.onblocked = () => resolve(null);
+      } catch (e) { resolve(null); }
+    });
+    return idbPromise;
+  }
+
+  async function idbRun(mode, fn) {
+    const db = await idbOpen();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(IDB_STORE, mode);
+        const store = tx.objectStore(IDB_STORE);
+        const req = fn(store);
+        tx.oncomplete = () => resolve(req ? req.result : true);
+        tx.onerror = () => resolve(null);
+        tx.onabort = () => resolve(null);
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  function idbGet(key) { return idbRun('readonly', (s) => s.get(key)); }
+  function idbSet(key, val) { return idbRun('readwrite', (s) => s.put(val, key)); }
+  function idbDel(key) { return idbRun('readwrite', (s) => s.delete(key)); }
+
+  function readSessionStore() {
+    try {
+      const raw = sessionStorage.getItem(SESS_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  function clearSessionStore() {
+    try { sessionStorage.removeItem(SESS_KEY); } catch (e) {}
+  }
+
+  function validIdentity(v) {
+    return !!(v && v.user_id && (v.secret || v.session_token));
   }
 
   /* ───────────────────────── 1. 작은 도구들 ───────────────────────── */
@@ -352,7 +416,308 @@
     authBusy: false,
     sheetHidden: false,
     carry: null,          // 이 기기에 남아 있는(아이디를 붙일) 신원
+    places: new Map(),    // '위도,경도' → 머문 곳 장소·업종(캐시)
+    autoLogin: true,      // 로그인 화면의 '자동 로그인' 체크 상태
   };
+
+  /* ───────────────────── 3-B. 머문 곳 장소 판별 (OpenStreetMap · 키 없음) ─────────────────────
+     · Overpass: 머문 좌표 반경 80m 의 카페·매장·건물·공원 등을 찾아 '가장 가까운 곳'을 고른다.
+     · Nominatim 역지오코딩: 장소 이름이 없을 때 도로명·동 이름으로 채운다.
+     · 좌표(소수 4자리) 캐시(메모리 + localStorage) + 1.2초 간격 큐 → 같은 곳을 두 번 묻지 않고 429 를 피한다. */
+  const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/reverse';
+  const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+  const PLACE_LS_KEY = 'urikkiri.places.v1';
+  const PLACE_TTL_MS = 30 * 24 * 3600 * 1000;    // 찾은 곳은 30일 캐시
+  const PLACE_FAIL_TTL_MS = 10 * 60 * 1000;      // 못 찾은 곳은 10분 뒤 다시 시도
+  const PLACE_GAP_MS = 1200;                     // API 예절: 초당 1회 이하
+  const PLACE_RADIUS_M = 80;
+  const PLACE_MAX_PER_VIEW = 12;
+
+  const PLACE_CAT = {
+    cafe:    { label: '카페',        ico: '☕' },
+    food:    { label: '음식점',      ico: '🍽️' },
+    store:   { label: '마트/편의점', ico: '🛒' },
+    mall:    { label: '쇼핑몰',      ico: '🛍️' },
+    shop:    { label: '상가',        ico: '🏪' },
+    medical: { label: '병원/약국',   ico: '🏥' },
+    school:  { label: '학교',        ico: '🏫' },
+    park:    { label: '공원',        ico: '🌳' },
+    home:    { label: '집/아파트',   ico: '🏠' },
+    office:  { label: '사무실',      ico: '🏢' },
+    transit: { label: '역',          ico: '🚇' },
+    stay:    { label: '숙소',        ico: '🛏️' },
+    car:     { label: '주차/주유',   ico: '🅿️' },
+    etc:     { label: '주변',        ico: '📍' },
+  };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function catOfOsm(t) {
+    if (!t) return null;
+    const a = t.amenity || '', s = t.shop || '', tu = t.tourism || '', le = t.leisure || '';
+    const b = t.building || '', of = t.office || '', ra = t.railway || '';
+    const lu = t.landuse || '', pl = t.place || '';
+
+    if (a === 'cafe' || a === 'ice_cream' || s === 'coffee' || s === 'bakery' || s === 'confectionery' || s === 'pastry') return 'cafe';
+    if (/^(restaurant|fast_food|food_court|canteen|bar|pub|biergarten)$/.test(a)) return 'food';
+    if (s === 'convenience' || s === 'supermarket' || s === 'greengrocer' || s === 'butcher' || s === 'grocery' || s === 'general' || s === 'seafood' || s === 'deli' || a === 'marketplace') return 'store';
+    if (s === 'mall' || s === 'department_store' || a === 'department_store') return 'mall';
+    if (/^(hospital|clinic|doctors|dentist|pharmacy|veterinary)$/.test(a) || s === 'chemist' || s === 'medical_supply') return 'medical';
+    if (/^(school|university|college|kindergarten|language_school|driving_school|prep_school)$/.test(a)) return 'school';
+    if (le === 'park' || le === 'garden' || le === 'playground' || le === 'nature_reserve' || a === 'fitness_centre') return 'park';
+    if (/^(apartments|residential|house|detached|terrace|dormitory|bungalow|semidetached_house|hut)$/.test(b) || pl === 'house' || lu === 'residential') return 'home';
+    if (of) return 'office';
+    if (ra === 'station' || ra === 'subway_entrance' || ra === 'halt' || a === 'bus_station' || a === 'public_transport') return 'transit';
+    if (/^(hotel|motel|guest_house|hostel|apartment|chalet)$/.test(tu)) return 'stay';
+    if (/^(parking|parking_space|fuel|charging_station|car_rental|car_wash)$/.test(a) || b === 'garage' || b === 'parking') return 'car';
+    if (/^(commercial|retail|kiosk|mixed|office|warehouse)$/.test(b)
+        || a === 'bank' || a === 'atm' || a === 'post_office' || a === 'townhall'
+        || a === 'place_of_worship' || a === 'community_centre' || a === 'library') return 'shop';
+    if (s) return 'shop';
+    return null;
+  }
+
+  /* 이름에 들어 있는 말로 업종을 한 번 더 다듬는다 (예: '스킨포유 NC백화점강서점' → 쇼핑몰) */
+  const PLACE_NAME_RULES = [
+    [/아파트|아이파크|단지|빌라|오피스텔|맨션|주공|래미안|자이|힐스테이트|푸르지오|더샵/, 'home'],
+    [/백화점|쇼핑몰|아울렛|플라자|프라자|몰$/, 'mall'],
+    [/스타벅스|투썸|이디야|메가커피|커피빈|폴바셋|카페|커피/, 'cafe'],
+    [/마트|편의점|GS25|CU|세븐일레븐|이마트|홈플러스|노브랜드/, 'store'],
+    [/병원|의원|약국|치과|한의원/, 'medical'],
+    [/초등학교|중학교|고등학교|대학교|유치원|학교/, 'school'],
+    [/공원/, 'park'],
+    [/역$|정류장/, 'transit'],
+    [/식당|국밥|치킨|피자|분식|횟집|김밥|백반|냉면/, 'food'],
+  ];
+
+  function catFromName(name) {
+    const s = String(name || '');
+    for (const item of PLACE_NAME_RULES) {
+      if (item[0].test(s)) return item[1];
+    }
+    return null;
+  }
+
+  /* 장소명으로 쓰기에 의미 없는 시설(자전거 대여소·ATM·정류장 등) */
+  const PLACE_SKIP_TYPE = /^(bicycle_rental|bicycle_parking|atm|parking|parking_space|bench|waste_basket|vending_machine|drinking_water|toilets|bus_stop|shelter)$/;
+
+  function placeKeyOf(lat, lng) {
+    return Number(lat).toFixed(4) + ',' + Number(lng).toFixed(4);
+  }
+
+  function placeCached(lat, lng) {
+    if (lat == null || lng == null || !isFinite(lat) || !isFinite(lng)) return null;
+    const key = placeKeyOf(lat, lng);
+    const hit = state.places.get(key);
+    if (!hit) return null;
+    if (Date.now() - (Number(hit.at) || 0) > (hit.ok ? PLACE_TTL_MS : PLACE_FAIL_TTL_MS)) {
+      state.places.delete(key);
+      return null;
+    }
+    return hit;
+  }
+
+  function loadPlaceCache() {
+    const saved = LS.get(PLACE_LS_KEY, null);
+    if (!saved || typeof saved !== 'object') return;
+    Object.keys(saved).forEach((k) => {
+      const v = saved[k];
+      if (v && typeof v === 'object' && v.at) state.places.set(k, v);
+    });
+  }
+
+  function savePlace(key, val) {
+    state.places.set(key, val);
+    try {
+      const all = {};
+      Array.from(state.places.keys()).slice(-400).forEach((k) => { all[k] = state.places.get(k); });
+      LS.set(PLACE_LS_KEY, all);
+    } catch (e) {}
+  }
+
+  function fetchT(url, opts, ms) {
+    if (typeof AbortController === 'undefined') return fetch(url, Object.assign({ cache: 'no-store' }, opts));
+    const ac = new AbortController();
+    const timer = setTimeout(() => { try { ac.abort(); } catch (e) {} }, ms || 9000);
+    return fetch(url, Object.assign({ cache: 'no-store' }, opts, { signal: ac.signal }))
+      .then((res) => { clearTimeout(timer); return res; },
+            (err) => { clearTimeout(timer); throw err; });
+  }
+
+  async function fetchNearby(lat, lng) {
+    const q = '[out:json][timeout:8];('
+      + ['amenity', 'shop', 'tourism', 'office']
+        .map((k) => 'nwr(around:' + PLACE_RADIUS_M + ',' + lat + ',' + lng + ')[' + k + '];').join('')
+      + 'nwr(around:' + PLACE_RADIUS_M + ',' + lat + ',' + lng + ')[leisure~"^(park|garden|playground|nature_reserve)$"];'
+      + 'nwr(around:' + PLACE_RADIUS_M + ',' + lat + ',' + lng + ')[building~"^(apartments|residential|house|dormitory|commercial|retail)$"];'
+      + 'nwr(around:' + PLACE_RADIUS_M + ',' + lat + ',' + lng + ')[railway~"^(station|subway_entrance|halt)$"];'
+      + ');out center tags 80;';
+    const res = await fetchT(OVERPASS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: 'data=' + encodeURIComponent(q),
+    }, 4000);
+    if (!res || !res.ok) return null;
+    const data = await res.json();
+    return (data.elements || []).map((e) => {
+      const tags = e.tags || {};
+      const c = e.center || e;
+      if (!c || !isFinite(c.lat) || !isFinite(c.lon)) return null;
+      return {
+        name: String(tags['name:ko'] || tags.name || tags.brand || tags.operator || '').trim(),
+        tags,
+        dist: haversine({ lat, lng }, { lat: c.lat, lng: c.lon }),
+      };
+    }).filter(Boolean);
+  }
+
+  async function fetchReverse(lat, lng) {
+    const url = NOMINATIM_URL + '?format=jsonv2&accept-language=ko&zoom=18&addressdetails=1'
+      + '&lat=' + encodeURIComponent(lat) + '&lon=' + encodeURIComponent(lng);
+    const res = await fetchT(url, { headers: { Accept: 'application/json' } }, 9000);
+    if (!res || !res.ok) return null;
+    const data = await res.json();
+    return data && !data.error ? data : null;
+  }
+
+  function addrOf(rev) {
+    const a = (rev && rev.address) || {};
+    const seen = new Set();
+    const out = [];
+    [a.city || a.province || a.state, a.borough || a.city_district || a.county,
+      a.suburb || a.quarter || a.neighbourhood || a.village, a.road, a.house_number]
+      .forEach((b) => {
+        const s = String(b || '').trim();
+        if (s && !seen.has(s)) { seen.add(s); out.push(s); }
+      });
+    return out.join(' ');
+  }
+
+  /* 도로·행정동 이름은 장소명으로 쓰지 않는다 */
+  function isRoadName(s) {
+    return /(로|길|대로|동|읍|면|리|구|시|군)\s*\d*\s*(길|로)?$/.test(String(s || ''));
+  }
+
+  /* Nominatim display_name 첫마디가 건물·단지 이름일 때(예: '도시개발2단지 아파트, 방화동, …') */
+  function displayPlaceName(rev) {
+    if (!rev) return '';
+    const first = String(rev.display_name || '').split(',')[0].trim();
+    if (!first || isRoadName(first)) return '';
+    return first;
+  }
+
+  function refineCat(name, cat) {
+    const byName = catFromName(name);
+    if (!byName) return cat || 'etc';
+    if (!cat || cat === 'etc' || cat === 'shop') return byName;
+    return cat;
+  }
+
+  function combinePlace(pois, rev) {
+    const addr = addrOf(rev);
+    const list = (pois || []).slice().sort((a, b) => a.dist - b.dist);
+    const named = list.filter((p) => p.name && p.dist <= PLACE_RADIUS_M);
+    const biz = named.filter((p) => { const c = catOfOsm(p.tags); return !!c && c !== 'home'; });
+
+    let pick = biz.filter((p) => p.dist <= 45)[0] || null;                          // 아주 가까운 매장·카페
+    if (!pick) pick = named.filter((p) => catOfOsm(p.tags) === 'home' && p.dist <= 70)[0] || null;  // 주거 건물
+    if (!pick) pick = biz[0] || null;                                               // 반경 안의 가장 가까운 곳
+
+    const revJunk = !!(rev && PLACE_SKIP_TYPE.test(String(rev.type || '')));
+    const revCat = rev ? catOfOsm({ [rev.category || '']: rev.type || '' }) : null;
+    if (pick) {
+      return { ok: true, name: pick.name, cat: refineCat(pick.name, catOfOsm(pick.tags)), addr,
+        dist: Math.round(pick.dist), src: 'osm', at: Date.now() };
+    }
+    if (rev && rev.name && !revJunk && revCat) {
+      return { ok: true, name: rev.name, cat: refineCat(rev.name, revCat), addr, src: 'nominatim', at: Date.now() };
+    }
+    if (rev && rev.name && !revJunk && rev.category !== 'highway') {
+      return { ok: true, name: rev.name, cat: refineCat(rev.name, 'etc'), addr, src: 'nominatim', at: Date.now() };
+    }
+    const dName = displayPlaceName(rev);
+    if (dName) {
+      return { ok: true, name: dName, cat: refineCat(dName, 'etc'), addr, src: 'nominatim', at: Date.now() };
+    }
+    const a = (rev && rev.address) || {};
+    const area = String(a.road || a.suburb || a.quarter || a.neighbourhood || a.city_district || '').trim();
+    if (area) return { ok: true, name: area, cat: 'etc', addr, src: 'addr', at: Date.now() };
+    return { ok: false, name: '', cat: 'etc', addr, at: Date.now() };
+  }
+
+  /* Nominatim 으로 먼저 찾고(빠름), 이름을 못 찾았을 때만 Overpass 로 주변 POI 를 뒤진다. */
+  async function fetchPlace(lat, lng) {
+    let rev = null;
+    try { rev = await fetchReverse(lat, lng); } catch (e) { rev = null; }
+    const quick = combinePlace(null, rev);
+    if (quick && quick.ok) return quick;
+
+    let pois = null;
+    try { pois = await fetchNearby(lat, lng); } catch (e) { pois = null; }
+    const better = combinePlace(pois, rev);
+    return better && better.ok ? better : quick;
+  }
+
+  const placeQueue = [];
+  const placeWaiting = new Map();   // key → Promise
+  let placeBusy = false;
+  let placeLastAt = 0;
+
+  async function pumpPlaces() {
+    if (placeBusy) return;
+    placeBusy = true;
+    while (placeQueue.length) {
+      const wait = PLACE_GAP_MS - (Date.now() - placeLastAt);
+      if (wait > 0) await sleep(wait);
+      const job = placeQueue.shift();
+      placeLastAt = Date.now();
+      let out = null;
+      try { out = await fetchPlace(job.lat, job.lng); } catch (e) { out = null; }
+      const val = out || { ok: false, name: '', cat: 'etc', addr: '', at: Date.now() };
+      savePlace(job.key, val);
+      placeWaiting.delete(job.key);
+      try { job.resolve(val); } catch (e) {}
+    }
+    placeBusy = false;
+  }
+
+  /* 좌표의 장소를 캐시에서 먼저 찾고, 없으면 큐에 넣어 조회한다. */
+  function placeSoon(lat, lng, onDone) {
+    if (lat == null || lng == null || !isFinite(lat) || !isFinite(lng)) {
+      if (onDone) onDone(null);
+      return;
+    }
+    const hit = placeCached(lat, lng);
+    if (hit) { if (onDone) onDone(hit); return; }
+
+    const key = placeKeyOf(lat, lng);
+    const waiting = placeWaiting.get(key);
+    if (waiting) { waiting.then((r) => { if (onDone) onDone(r); }); return; }
+    if (placeQueue.length >= PLACE_MAX_PER_VIEW) { if (onDone) onDone(null); return; }
+
+    const p = new Promise((resolve) => {
+      placeQueue.push({ key, lat: Number(lat), lng: Number(lng), resolve });
+      pumpPlaces();
+    });
+    placeWaiting.set(key, p);
+    p.then((r) => { if (onDone) onDone(r); });
+  }
+
+  function placeMeta(place) {
+    return PLACE_CAT[(place && place.cat) || 'etc'] || PLACE_CAT.etc;
+  }
+
+  function placeLabel(place) {
+    if (!place) return '';
+    const meta = placeMeta(place);
+    return place.name ? place.name + ' · ' + meta.label : meta.label;
+  }
+
+  function placePinText(place) {
+    if (!place) return '';
+    const meta = placeMeta(place);
+    return meta.ico + ' ' + (place.name || meta.label);
+  }
 
   /* 서버에 보내는 열쇠: 로그인으로 받은 세션 토큰을 우선 쓰고, 없으면 예전 비밀 토큰 */
   function mySecret() {
@@ -521,11 +886,11 @@
   }
 
   /* ───────────────────────── 6. 프로필 ───────────────────────── */
-  function saveMe() {
-    if (!state.me) return;
-    LS.set(ME_KEY, {
+  function identitySnapshot() {
+    if (!state.me) return null;
+    return {
       user_id: state.me.user_id,
-      secret: state.me.secret,
+      secret: state.me.secret || state.me.session_token || '',
       session_token: state.me.session_token || '',
       username: state.me.username || '',
       friend_code: state.me.friend_code,
@@ -537,7 +902,35 @@
       lng: state.me.lng,
       accuracy: state.me.accuracy,
       auto: state.auto,
-    });
+      autoLogin: state.autoLogin !== false,
+    };
+  }
+
+  /* 자동 로그인 열쇠를 localStorage + 쿠키(1년) + IndexedDB 세 곳에 남긴다.
+     자동 로그인이 꺼져 있으면 이번 브라우저 탭(sessionStorage)에만 남겨, 닫으면 풀린다. */
+  async function persistLogin() {
+    const snap = identitySnapshot();
+    if (!snap) return;
+    if (state.autoLogin === false) {
+      try { sessionStorage.setItem(SESS_KEY, JSON.stringify(snap)); } catch (e) {}
+      LS.del(ME_KEY);
+      clearSessionCookie();
+      await idbDel('me');
+      return;
+    }
+    LS.set(ME_KEY, snap);
+    setSessionCookie(state.me.user_id, state.me.session_token || state.me.secret, state.me.secret);
+    await idbSet('me', snap);
+    clearSessionStore();
+  }
+
+  function saveMe() {
+    if (!state.me) return;
+    if (state.autoLogin === false) {
+      try { sessionStorage.setItem(SESS_KEY, JSON.stringify(identitySnapshot())); } catch (e) {}
+      return;
+    }
+    LS.set(ME_KEY, identitySnapshot());
     setSessionCookie(state.me.user_id, state.me.session_token || state.me.secret, state.me.secret);
   }
 
@@ -552,10 +945,14 @@
     state.me.username = prof.username || '';
   }
 
-  /* localStorage → 없으면 쿠키에서 신원 복원 */
-  function loadIdentity() {
+  /* 신원 복원: localStorage → 이번 탭(sessionStorage) → 쿠키 → IndexedDB 순서로 찾는다 */
+  async function loadIdentity() {
     const saved = LS.get(ME_KEY, null);
-    if (saved && saved.user_id && (saved.secret || saved.session_token)) return saved;
+    if (validIdentity(saved)) return saved;
+
+    const sess = readSessionStore();
+    if (validIdentity(sess)) return sess;
+
     const c = readSessionCookie();
     if (c && c.user_id && (c.session_token || c.secret)) {
       return {
@@ -566,6 +963,11 @@
         fromCookie: true,
       };
     }
+
+    try {
+      const fromIdb = await idbGet('me');
+      if (validIdentity(fromIdb)) return Object.assign({ fromIdb: true }, fromIdb);
+    } catch (e) {}
     return null;
   }
 
@@ -580,7 +982,7 @@
   }
 
   async function bootstrap(nickname, identity) {
-    let saved = identity || loadIdentity();
+    let saved = identity || await loadIdentity();
     if (!saved || !saved.user_id || !(saved.secret || saved.session_token)) {
       saved = newIdentity();
     }
@@ -594,6 +996,7 @@
     applyProfile(prof);
     state.auto = saved.auto !== false;
     saveMe();
+    persistLogin();
     return state.me;
   }
 
@@ -610,6 +1013,7 @@
     applyProfile(prof);
     state.auto = true;
     saveMe();
+    persistLogin();
     return state.me;
   }
 
@@ -789,6 +1193,7 @@
       if (out && out.profile) applyProfile(out.profile);
       else state.me.username = uname;
       saveMe();
+      persistLogin();
       LS.set('urikkiri.lastUser', uname);
       state.authBusy = false;
       setBtnBusy(el.btnIdSave, false, '아이디 만들기');
@@ -1096,6 +1501,10 @@
     return trimmed;
   }
 
+  /* 동선 기록 한 점.
+     · 머무는 동안에도 '체류 시작 시각'을 담은 점이 남도록, 시작점은 지우지 않고
+       1분(10분 넘게 머물면 5분)에 한 번씩 이어 붙인다 → 5분 체류가 사라지지 않는다.
+     · 이동 중 잔떨림은 마지막 점만 갱신해 점이 쌓이지 않게 한다(체류 시작점은 건드리지 않음). */
   function addHistoryPoint(id, p) {
     if (!id || !p || !isFinite(p.lat) || !isFinite(p.lng)) return false;
     const arr = historyFor(id);
@@ -1108,9 +1517,22 @@
     };
 
     if (last) {
+      const dt = t - last.t;
+      if (dt <= 0) return false;
       const d = haversine(last, point);
-      if (t - last.t < 15 * 1000 && d < 12) return false;
-      if (d < 10 && t - last.t < 120 * 1000) {
+
+      if (point.since && d <= STAY_RADIUS_M) {
+        // 머무는 중: 시작점은 그대로 두고 일정 간격으로만 남긴다
+        const began = new Date(point.since).getTime();
+        const stayAge = isFinite(began) ? t - began : 0;
+        const gap = stayAge >= 10 * 60 * 1000 ? STAY_LONG_SAMPLE_MS : STAY_SAMPLE_MS;
+        if (dt < gap) return false;
+      } else if (last.since && d <= STAY_RADIUS_M && dt < STAY_SAMPLE_MS) {
+        return false;   // 체류 시작점은 짧은 간격의 점으로 덮지 않는다
+      } else if (dt < 15 * 1000 && d < 12) {
+        return false;
+      } else if (d < 10 && dt < 120 * 1000 && !last.since) {
+        // 이동 중 잔떨림: 마지막 점만 새 점으로 바꾼다
         arr[arr.length - 1] = point;
         state.history.set(id, arr);
         return false;
@@ -1123,33 +1545,86 @@
     return true;
   }
 
+  /* ── 머문 곳(체류) 찾기 ─────────────────────────────────────────────
+     위치를 기록할 때마다 '머물기 시작한 시각'(since)을 점에 남긴다.
+     같은 since 로 이어진 점들이 한 곳에 머문 구간이고, 그 길이가 5분 이상이면 '체류'로 센다.
+     (옛 기록처럼 since 가 없을 때만 같은 자리에 머문 점을 반경으로 묶어 판단) */
+  function stayStartOf(p) {
+    if (!p || !p.since) return null;
+    const t = new Date(p.since).getTime();
+    return isFinite(t) ? t : null;
+  }
+
+  function pointMoving(p) {
+    return !!(p && p.speed != null && isFinite(p.speed) && p.speed >= MOVE_KMH);
+  }
+
+  function stayGroups(pts) {
+    if (!pts || pts.length < 2) return [];
+    const raw = [];
+    const anySince = pts.some((p) => stayStartOf(p) != null);
+
+    if (anySince) {
+      let cur = null;
+      pts.forEach((p, i) => {
+        const sin = stayStartOf(p);
+        if (sin == null) { cur = null; return; }
+        if (cur && Math.abs(cur.start - sin) <= 1000) { cur.to = i; return; }
+        cur = { start: sin, from: i, to: i };
+        raw.push(cur);
+      });
+    } else {
+      let i = 0;
+      while (i < pts.length) {
+        if (pointMoving(pts[i])) { i++; continue; }
+        let j = i;
+        let sumLat = pts[i].lat, sumLng = pts[i].lng, n = 1;
+        while (j + 1 < pts.length) {
+          const nx = pts[j + 1];
+          if (nx.t - pts[j].t > STAY_GAP_MAX_MS || pointMoving(nx)) break;
+          if (haversine({ lat: sumLat / n, lng: sumLng / n }, nx) > STAY_RADIUS_M) break;
+          j++;
+          sumLat += nx.lat; sumLng += nx.lng; n++;
+        }
+        raw.push({ start: pts[i].t, from: i, to: j });
+        i = j + 1;
+      }
+    }
+
+    return raw.map((g) => {
+      const span = pts.slice(g.from, g.to + 1);
+      let sumLat = 0, sumLng = 0;
+      span.forEach((p) => { sumLat += p.lat; sumLng += p.lng; });
+      const lat = sumLat / span.length;
+      const lng = sumLng / span.length;
+      let end = pts[g.to].t;
+      const nx = pts[g.to + 1];
+      // 자리를 뜨는 첫 점(같은 자리 안이면)의 시각까지를 '머문 끝'으로 본다
+      if (nx && stayStartOf(nx) == null && nx.t - end <= 90 * 1000
+          && haversine({ lat, lng }, nx) <= STAY_RADIUS_M) end = Math.max(end, nx.t);
+      return { start: g.start, end, from: g.from, to: g.to, lat, lng, ms: Math.max(0, end - g.start) };
+    });
+  }
+
   function buildSegments(pts) {
     if (!pts || pts.length < 2) return [];
     const out = [];
-    const clusters = [];
-    let cur = { start: 0, end: 0 };
+    const startT = pts[0].t;
 
-    for (let i = 1; i < pts.length; i++) {
-      const far = haversine(pts[cur.start], pts[i]) > STAY_RADIUS_M;
-      if (far) {
-        clusters.push(cur);
-        cur = { start: i, end: i };
-      } else {
-        cur.end = i;
-      }
-    }
-    clusters.push(cur);
+    const stays = stayGroups(pts)
+      .map((g) => Object.assign(g, { start: Math.max(g.start, startT), ms: Math.max(0, g.end - Math.max(g.start, startT)) }))
+      .filter((g) => g.ms >= STAY_MIN_MS);
 
-    const stays = clusters.filter((c) => pts[c.end].t - pts[c.start].t >= STAY_MIN_MS);
     let prev = 0;
-
-    const pushMove = (from, to) => {
+    let prevEndT = pts[0].t;
+    const pushMove = (from, to, fromT) => {
       if (to - from < 1) return;
       let dist = 0;
       for (let i = from + 1; i <= to; i++) dist += haversine(pts[i - 1], pts[i]);
-      const ms = Math.max(1, pts[to].t - pts[from].t);
+      const startT = Math.max(pts[from].t, fromT || 0);
+      const ms = Math.max(1, pts[to].t - startT);
       out.push({
-        kind: 'move', start: pts[from].t, end: pts[to].t, ms,
+        kind: 'move', start: startT, end: pts[to].t, ms,
         meters: dist,
         kmh: (dist / 1000) / (ms / 3600000),
         from: pts[from], to: pts[to],
@@ -1157,17 +1632,16 @@
     };
 
     for (const s of stays) {
-      if (s.start > prev) pushMove(prev, s.start);
-      const span = pts.slice(s.start, s.end + 1);
-      const lat = span.reduce((a, p) => a + p.lat, 0) / span.length;
-      const lng = span.reduce((a, p) => a + p.lng, 0) / span.length;
+      if (s.from > prev) pushMove(prev, s.from, prevEndT);
       out.push({
-        kind: 'stay', start: pts[s.start].t, end: pts[s.end].t,
-        ms: Math.max(1, pts[s.end].t - pts[s.start].t), lat, lng,
+        kind: 'stay', start: s.start, end: s.end,
+        ms: Math.max(1, s.ms), lat: s.lat, lng: s.lng,
+        place: placeCached(s.lat, s.lng),
       });
-      prev = s.end;
+      prev = s.to;
+      prevEndT = s.end;
     }
-    if (prev < pts.length - 1) pushMove(prev, pts.length - 1);
+    if (prev < pts.length - 1) pushMove(prev, pts.length - 1, prevEndT);
 
     return out;
   }
@@ -1209,14 +1683,15 @@
 
     const firstStay = stays[0] || null;
     const lastStay = stays[stays.length - 1] || null;
-    const startIsStay = !!firstStay && firstStay.start === startT;
-    const endIsStay = !!lastStay && lastStay.end === endT;
+    const startIsStay = !!firstStay && firstStay.start <= startT + 2 * 60 * 1000;
+    const endIsStay = !!lastStay && lastStay.end >= endT - 2 * 60 * 1000;
 
     const pins = [];
     stays.forEach((s, i) => {
       pins.push({
         key: 's' + i, kind: 'stay', num: i + 1, lat: s.lat, lng: s.lng,
         start: s.start, end: s.end, ms: s.ms,
+        place: s.place || placeCached(s.lat, s.lng),
         first: i === 0 && startIsStay,
         last: i === stays.length - 1 && endIsStay,
       });
@@ -1227,7 +1702,10 @@
     }
     if (!endIsStay) {
       const last = pts[pts.length - 1];
-      pins.push({ key: 'now', kind: 'now', num: 0, lat: last.lat, lng: last.lng, start: endT, end: endT, ms: 0, first: false, last: true });
+      pins.push({
+        key: 'now', kind: 'now', num: 0, lat: last.lat, lng: last.lng, start: endT, end: endT, ms: 0, first: false, last: true,
+        place: placeCached(last.lat, last.lng),
+      });
     }
 
     const rows = segs.map((s, i) => {
@@ -1305,9 +1783,12 @@
 
   function routePinIcon(pin, m, color) {
     let inner = '';
+    const placeLine = pin.place
+      ? '<span class="rv-pin-place">' + esc(placePinText(pin.place)) + '</span>'
+      : '';
     if (pin.kind === 'stay') {
       inner = '<span class="rv-pin-num">' + pin.num + '</span>'
-        + '<span class="rv-pin-txt">' + esc(durText(pin.ms)) + '</span>';
+        + '<span class="rv-pin-txt">' + esc(durText(pin.ms)) + placeLine + '</span>';
       if (pin.first) inner += '<span class="rv-pin-tag">출발</span>';
       if (pin.last) inner += '<span class="rv-pin-tag rv-pin-tag--now">지금</span>';
     } else if (pin.kind === 'start') {
@@ -1316,7 +1797,7 @@
     } else {
       const fresh = Date.now() - pin.start < 15 * 60 * 1000;
       inner = '<span class="rv-pin-dot"></span>'
-        + '<span class="rv-pin-txt"><b>' + (fresh ? '현재' : '최근') + '</b> ' + esc(hhmm(pin.start)) + '</span>';
+        + '<span class="rv-pin-txt"><b>' + (fresh ? '현재' : '최근') + '</b> ' + esc(hhmm(pin.start)) + placeLine + '</span>';
     }
 
     const html = '<div class="rv-pin rv-pin--' + pin.kind + '" style="--c:' + esc(color) + '">' + inner + '</div>';
@@ -1332,17 +1813,23 @@
   function stayPopupHTML(pin, model) {
     const seg = model.segs.find((s) => s.kind === 'stay' && s.start === pin.start);
     const next = seg ? nextMoveAfter(seg, model) : null;
-    const title = pin.first ? '출발한 자리' : (pin.last ? '지금 머무는 곳' : '머문 곳 ' + pin.num);
-    const rows = [
-      ['머문 시간', durText(pin.ms)],
-      ['시각', hhmm(pin.start) + ' ~ ' + hhmm(pin.end)],
-    ];
+    const place = pin.place || (seg && seg.place) || null;
+    const meta = placeMeta(place);
+    const title = (place && place.name)
+      ? meta.ico + ' ' + place.name
+      : (pin.first ? '출발한 자리' : (pin.last ? '지금 머무는 곳' : '머문 곳 ' + pin.num));
+    const rows = [];
+    if (place) rows.push(['장소', placeLabel(place)]);
+    rows.push(['머문 시간', durText(pin.ms)]);
+    rows.push(['시각', hhmm(pin.start) + ' ~ ' + hhmm(pin.end)]);
+    if (place && place.addr) rows.push(['주소', place.addr]);
     if (next) {
       rows.push(['다음 이동', distText(next.meters) + ' · ' + durText(next.ms) + (next.kmh >= MOVE_KMH ? ' · ' + Math.round(next.kmh) + 'km/h' : '')]);
     }
     return '<div class="rv-pop-k">' + esc(title) + '</div>'
       + '<div class="rv-pop-t">' + esc(hhmm(pin.start)) + ' ~ ' + esc(hhmm(pin.end)) + '</div>'
-      + popupRows(rows);
+      + popupRows(rows)
+      + '<p class="rv-pop-note">5분 이상 머문 곳만 체류로 잡아요.</p>';
   }
 
   function edgePopupHTML(pin, model, m) {
@@ -1357,6 +1844,8 @@
       rows.push(['최근 갱신', m.updated_at ? timeAgo(m.updated_at) + ' · ' + clockOf(m.updated_at) : '—']);
       if (acc) rows.push(['위치 정확도', acc]);
     }
+    const place = !isStart ? pin.place : null;
+    if (place) rows.splice(0, 0, ['장소', placeLabel(place)]);
     return '<div class="rv-pop-k">' + (isStart ? '출발 지점' : '최근 · 현재 위치') + '</div>'
       + '<div class="rv-pop-t">' + esc(hhmm(pin.start)) + '</div>'
       + popupRows(rows)
@@ -1453,8 +1942,34 @@
     });
 
     state.routeModel = model;
+    warmStayPlaces(model, m, color);
     if (opts.fit !== false) fitRoute(model);
     return model;
+  }
+
+  /* 체류 핀마다 장소·업종을 조회해 핀 라벨·팝업·타임라인을 채운다(캐시 우선). */
+  function warmStayPlaces(model, m, color) {
+    if (!model) return;
+    let asked = 0;
+    model.pins.forEach((pin) => {
+      if (pin.kind !== 'stay' && pin.kind !== 'now') return;
+      if (pin.place || asked >= PLACE_MAX_PER_VIEW) return;
+      asked++;
+      placeSoon(pin.lat, pin.lng, (place) => {
+        if (!place || !place.ok) return;
+        if (state.routeModel !== model) return;
+        pin.place = place;
+        const seg = model.segs.find((s) => s.kind === 'stay' && s.start === pin.start);
+        if (seg) seg.place = place;
+        if (pin.marker) {
+          try {
+            pin.marker.setIcon(routePinIcon(pin, m, color));
+            pin.marker.setPopupContent(pin.kind === 'stay' ? stayPopupHTML(pin, model) : edgePopupHTML(pin, model, m));
+          } catch (e) {}
+        }
+        renderRouteTimeline(model);
+      });
+    });
   }
 
   function routeSigOf(m) {
@@ -1467,7 +1982,9 @@
   function renderRouteBar(m, model) {
     if (!el.rvWho) return;
     el.rvWho.textContent = m.nickname + ' 님의 이동 동선';
-    const bits = [model.pins.length + '개 지점', '총 ' + distText(model.meters), durText(model.spanMs)];
+    const bits = [model.pins.length + '개 지점'];
+    if (model.stays.length) bits.push('머문 곳 ' + model.stays.length + '곳');
+    bits.push('총 ' + distText(model.meters), durText(model.spanMs));
     el.rvMeta.textContent = bits.join(' · ');
     el.rvTlCount.textContent = model.rows.length + '개 구간';
   }
@@ -1476,9 +1993,14 @@
     const t = hhmm(row.start) + ' ~ ' + hhmm(row.end);
     if (row.kind === 'stay') {
       const pin = model.pins.find((p) => p.key === row.pinKey);
+      const place = (pin && pin.place) || (row.seg && row.seg.place) || null;
+      const meta = placeMeta(place);
+      const title = place
+        ? meta.ico + ' ' + (place.name ? place.name + ' · ' + meta.label : meta.label)
+        : '머문 곳' + (pin ? ' ' + pin.num : '');
       return '<li><button type="button" class="rv-row rv-row--stay" data-row="' + esc(row.key) + '">'
         + '<span class="rv-row-num" style="--c:' + esc(color) + '">' + (pin ? pin.num : '·') + '</span>'
-        + '<span class="rv-row-body"><b>' + esc(durText(row.ms)) + ' 머묾</b><span>' + esc(t) + '</span></span>'
+        + '<span class="rv-row-body"><b>' + esc(title) + '</b><span>' + esc(t) + ' · ' + esc(durText(row.ms)) + ' 머묾</span></span>'
         + '<span class="rv-row-go">핀</span></button></li>';
     }
     const kind = moveKind(row.kmh);
@@ -2211,12 +2733,18 @@
   }
 
   function touchStay(m, lat, lng, speed) {
-    if (speed != null && speed >= MOVE_KMH) {
-      m.stay_since = null;
-      m._stayLat = lat;
-      m._stayLng = lng;
+    const moving = speed != null && speed >= MOVE_KMH;
+    if (moving) {
+      // GPS 가 한 번 튀었다고 '머무는 중'이 끊기지 않도록, 이동이 두 번 연속 잡혀야 끊는다
+      m._moveFixes = (m._moveFixes || 0) + 1;
+      if (m.stay_since == null || m._moveFixes >= 2) {
+        m.stay_since = null;
+        m._stayLat = lat;
+        m._stayLng = lng;
+      }
       return;
     }
+    m._moveFixes = 0;
     if (m._stayLat == null || m.stay_since == null) {
       m.stay_since = new Date().toISOString();
       m._stayLat = lat;
@@ -2771,6 +3299,7 @@
     setAuthMode(mode || 'login');
     setAuthMsg(el.loginMsg, '');
     setAuthMsg(el.regMsg, '');
+    setAutoLogin(readAutoLoginPref(), true);
     if (message) setAuthMsg(state.authMode === 'login' ? el.loginMsg : el.regMsg, message);
     const lastUser = LS.get('urikkiri.lastUser', '');
     if (lastUser) {
@@ -2779,6 +3308,37 @@
     }
     const lastNick = LS.get('urikkiri.lastNick', '');
     if (lastNick && el.inputNick && !el.inputNick.value) el.inputNick.value = lastNick;
+  }
+
+  /* 로그인 화면의 '자동 로그인' 체크박스(로그인·가입 폼 공통) */
+  function autoLoginBoxes() {
+    return $$('.auto-login');
+  }
+
+  function readAutoLoginPref() {
+    return LS.get(AUTO_KEY, true) !== false;
+  }
+
+  function setAutoLogin(on, silent) {
+    state.autoLogin = on !== false;
+    if (!silent) LS.set(AUTO_KEY, state.autoLogin);
+    autoLoginBoxes().forEach((b) => { b.checked = state.autoLogin; });
+  }
+
+  function formAutoLogin(sel) {
+    const box = $(sel);
+    return box ? !!box.checked : readAutoLoginPref();
+  }
+
+  /* 저장된 로그인 열쇠를 모두 지우고 로그인 화면으로 */
+  async function forgetLogin(message) {
+    LS.del(ME_KEY);
+    clearSessionCookie();
+    clearSessionStore();
+    try { await idbDel('me'); } catch (e) {}
+    state.carry = null;
+    const lastUser = LS.get('urikkiri.lastUser', '');
+    showJoin(lastUser ? 'login' : 'register', message);
   }
 
   function setBtnBusy(btn, busy, label) {
@@ -2801,6 +3361,7 @@
     if (!uname) { setAuthMsg(el.loginMsg, '아이디를 입력해 주세요'); el.loginId.focus(); return; }
     if (!pw) { setAuthMsg(el.loginMsg, '비밀번호를 입력해 주세요'); el.loginPw.focus(); return; }
 
+    state.autoLogin = formAutoLogin('#loginForm .auto-login');
     state.authBusy = true;
     setBtnBusy(el.btnLogin, true, '로그인 중…');
     try {
@@ -2833,6 +3394,7 @@
     }
     if (pw.length < 4) { setAuthMsg(el.regMsg, '비밀번호는 4자 이상으로 정해 주세요'); el.regPw.focus(); return; }
 
+    state.autoLogin = formAutoLogin('#registerForm .auto-login');
     state.authBusy = true;
     setBtnBusy(el.btnRegister, true, '만드는 중…');
     const carry = state.carry;
@@ -2863,7 +3425,9 @@
     const me = state.me;
     try { if (me && READY) await API.rpc('auth_logout', selfArgs()); } catch (e) {}
     clearSessionCookie();
+    clearSessionStore();
     LS.del(ME_KEY);
+    try { await idbDel('me'); } catch (e) {}
     if (me) LS.del('urikkiri.idHint.' + me.user_id);
     state.me = null;
     state.joined = false;
@@ -2882,6 +3446,13 @@
       setAuthMsg(el.regMsg, '');
       const first = state.authMode === 'login' ? el.loginId : el.inputNick;
       setTimeout(() => { try { first.focus(); } catch (err) {} }, 90);
+    });
+    autoLoginBoxes().forEach((box) => {
+      box.addEventListener('change', () => {
+        LS.set(AUTO_KEY, box.checked);
+        state.autoLogin = box.checked;
+        autoLoginBoxes().forEach((b) => { b.checked = box.checked; });
+      });
     });
     el.loginForm.addEventListener('submit', (e) => { e.preventDefault(); submitLogin(); });
     el.registerForm.addEventListener('submit', (e) => { e.preventDefault(); submitRegister(); });
@@ -3124,6 +3695,7 @@
     bindEvents();
     updateSheetHeight();
     readBattery();
+    loadPlaceCache();
 
     let addCode = '';
     try { addCode = normalizeCode(new URLSearchParams(location.search).get('add') || ''); } catch (e) {}
@@ -3138,27 +3710,48 @@
       return;
     }
 
-    const saved = loadIdentity();
+    const saved = await loadIdentity();
     state.addAfterStart = addCode;
+    state.autoLogin = saved ? saved.autoLogin !== false : readAutoLoginPref();
 
     /* 이 기기에 남은 신원이 있고, 아직 아이디가 없으면 가입 화면에서 그 계정에 아이디를 붙일 수 있다 */
     state.carry = saved && !saved.username ? saved : null;
 
     if (saved) {
       try {
-        await bootstrap(saved.nickname || '', saved);
+        /* 자동 로그인: 세션 토큰이 남아 있으면 서버에 한 번 확인하고 바로 들어간다 */
+        let restored = false;
+        if (saved.session_token) {
+          try {
+            const out = await API.rpc('auth_login_session', { p_token: saved.session_token });
+            if (out && out.profile && out.profile.user_id) {
+              state.me = freshMe({
+                user_id: out.profile.user_id,
+                secret: saved.secret || saved.session_token,
+                session_token: out.session_token || saved.session_token,
+                username: out.profile.username || '',
+              });
+              applyProfile(out.profile);
+              state.auto = saved.auto !== false;
+              saveMe();
+              persistLogin();
+              restored = true;
+            }
+          } catch (e) {
+            const detail = String(e.detail || e.message || e);
+            if (/unauthorized/.test(detail)) throw e;   // 세션이 죽었다 → 아래 만료 처리
+            console.warn('[우리끼리] 세션 확인 실패 — 저장된 열쇠로 계속', e);
+          }
+        }
+        if (!restored) await bootstrap(saved.nickname || '', saved);
         await enterApp();
         return;
       } catch (e) {
         const detail = String(e.detail || e.message || e);
         if (/unauthorized/.test(detail)) {
-          // 열쇠가 만료됐다: 아이디가 있으면 로그인, 없으면 새로 시작
+          // 열쇠가 만료됐다: 네 저장소를 모두 비우고 아이디로 다시 로그인하게 한다
           console.warn('[우리끼리] 저장된 열쇠가 만료됐어요 — 다시 로그인해 주세요');
-          LS.del(ME_KEY);
-          clearSessionCookie();
-          state.carry = null;
-          const lastUser = saved.username || LS.get('urikkiri.lastUser', '');
-          showJoin(lastUser ? 'login' : 'register', lastUser
+          await forgetLogin(saved.username
             ? '세션이 만료됐어요 — 아이디로 다시 로그인해 주세요'
             : '이 기기의 계정을 다시 확인해야 해요');
           return;
@@ -3192,6 +3785,9 @@
     closeMember: closeModal,
     history: (id) => historyFor(id).slice(),
     segments: (id) => buildSegments(historyFor(id)),
+    addPoint: (id, p) => addHistoryPoint(id, p),
+    place: (lat, lng) => new Promise((resolve) => placeSoon(lat, lng, resolve)),
+    places: () => Array.from(state.places.entries()),
     fit: () => fitToPeople(false),
     dump: () => ({
       me: state.me ? { ...state.me } : null,
