@@ -1265,7 +1265,8 @@
   function routeSigOf(m) {
     const pts = historyFor(m.user_id);
     const last = pts[pts.length - 1];
-    return [pts.length, last ? last.t : 0, m.lat, m.lng, m.updated_at || ''].join('|');
+    // 기록(점)이 늘었을 때만 다시 그린다 — 열어 둔 핀 팝업이 갱신마다 닫히지 않도록
+    return [pts.length, last ? last.t : 0].join('|');
   }
 
   function renderRouteBar(m, model) {
