@@ -1825,6 +1825,11 @@ svg { display: block; }
 .rv-chip.is-on { color: #fff; background: var(--accent-deep); }
 .rv-chip:active { transform: scale(.95); }
 .rv-chip--close { color: var(--ink-2); background: #f2f5fa; }
+.rv-close-short { display: none; }
+@media (max-width: 430px) {
+  .rv-close-full { display: none; }
+  .rv-close-short { display: inline; }
+}
 
 /* ───── 상세 타임라인 (아래에서 올라오는 작은 시트) ───── */
 .rv-timeline {

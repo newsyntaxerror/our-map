@@ -1363,7 +1363,6 @@
     el.rvTimeline.hidden = true;
     el.rvTlToggle.classList.remove('is-on');
     el.rvTlToggle.setAttribute('aria-expanded', 'false');
-    el.rvTlLabel.textContent = '타임라인';
 
     renderRouteBar(m, model);
     renderRouteTimeline(model);
@@ -1388,7 +1387,6 @@
     el.rvTimeline.hidden = !state.routeTlOpen;
     el.rvTlToggle.classList.toggle('is-on', state.routeTlOpen);
     el.rvTlToggle.setAttribute('aria-expanded', String(state.routeTlOpen));
-    el.rvTlLabel.textContent = state.routeTlOpen ? '타임라인 닫기' : '타임라인';
     if (state.routeModel) {
       setTimeout(() => { if (state.routeView) fitRoute(state.routeModel); }, 40);
     }
