@@ -783,7 +783,7 @@ begin
   if uname !~ '^[a-z][a-z0-9_]{3,19}$' then
     raise exception 'invalid_username';
   end if;
-  if octet_length(pw) < 6 or octet_length(pw) > 72 then
+  if octet_length(pw) < 4 or octet_length(pw) > 72 then
     raise exception 'invalid_password';
   end if;
   if exists (select 1 from public.friend_profiles where lower(username) = uname) then

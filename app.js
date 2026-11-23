@@ -285,7 +285,8 @@
     'btnIdSave', 'idClose',
     'app', 'map', 'meChip', 'meChipPin', 'myCode', 'myName', 'btnAddFriend', 'btnShare',
     'sheet', 'btnCollapse', 'tabs', 'tabFriends', 'tabChat', 'friendCount', 'chatBadge',
-    'btnLocate', 'btnAddFriend2', 'reqBox', 'reqCount', 'reqList',
+    'btnSheetHide', 'btnAddFriend2', 'reqBox', 'reqCount', 'reqList',
+    'fabLocate', 'sheetOpen', 'sheetOpenBadge',
     'panelFriends', 'panelChat', 'memberList', 'btnUpdate', 'updateSub', 'btnAuto', 'btnCopy',
     'convoList', 'toast',
     'memberModal', 'mCard', 'mAvatar', 'mName', 'mStatus', 'mRows', 'mEdit', 'mNickInput',
@@ -349,6 +350,7 @@
     readSending: {},
     authMode: 'login',
     authBusy: false,
+    sheetHidden: false,
     carry: null,          // 이 기기에 남아 있는(아이디를 붙일) 신원
   };
 
@@ -428,8 +430,35 @@
 
   function updateSheetHeight() {
     if (!el.sheet || el.app.hidden) return;
+    if (state.sheetHidden) {
+      document.documentElement.style.setProperty('--sheet-h', '0px');
+      return;
+    }
     const h = Math.round(el.sheet.getBoundingClientRect().height);
     if (h > 0) document.documentElement.style.setProperty('--sheet-h', h + 'px');
+  }
+
+  /* 하단 시트 접기/숨기기 — 지도를 넓게 보기 */
+  function setSheetHidden(hidden) {
+    state.sheetHidden = !!hidden;
+    if (el.sheet) el.sheet.classList.toggle('is-hidden', state.sheetHidden);
+    if (el.sheetOpen) el.sheetOpen.hidden = !state.sheetHidden;
+    updateSheetHeight();
+    if (state.map) setTimeout(() => state.map.invalidateSize(), 260);
+  }
+
+  /* 지도 위 '내 위치' 바로가기: 내 위치로 부드럽게 이동 + 위치 갱신 */
+  function focusMyLocation() {
+    if (!state.me) return;
+    if (state.selected) { state.selected = null; renderPins(); }
+    const m = state.me;
+    const hasFix = isFinite(m.lat) && isFinite(m.lng);
+    if (hasFix && state.map) {
+      const zoom = Math.max(state.map.getZoom() || 14, 16);
+      state.map.flyTo([m.lat, m.lng], zoom, { duration: 0.75 });
+    }
+    askLocation({ silent: true });
+    if (!hasFix) toast('내 위치를 확인하는 중이에요', 2200);
   }
 
   async function copyText(text) {
@@ -687,6 +716,12 @@
     el.chatBadge.hidden = unread === 0;
     el.chatBadge.textContent = unread > 99 ? '99+' : String(unread);
 
+    const waiting = unread + (state.incoming ? state.incoming.length : 0);
+    if (el.sheetOpenBadge) {
+      el.sheetOpenBadge.hidden = waiting === 0;
+      el.sheetOpenBadge.textContent = waiting > 99 ? '99+' : String(waiting);
+    }
+
     el.btnAuto.classList.toggle('is-on', state.auto);
     el.btnAuto.setAttribute('aria-pressed', String(state.auto));
     el.updateSub.textContent = state.me.updated_at ? (isStale(state.me) ? '오래됨' : timeAgo(state.me.updated_at)) : '대기 중';
@@ -741,7 +776,7 @@
       el.idInput.focus();
       return;
     }
-    if (pw.length < 6) { setAuthMsg(el.idMsg, '비밀번호는 6자 이상으로 정해 주세요'); el.idPw.focus(); return; }
+    if (pw.length < 4) { setAuthMsg(el.idMsg, '비밀번호는 4자 이상으로 정해 주세요'); el.idPw.focus(); return; }
 
     state.authBusy = true;
     setBtnBusy(el.btnIdSave, true, '만드는 중…');
@@ -2704,7 +2739,7 @@
     if (/no_password/.test(raw)) return '이 아이디에는 비밀번호가 없어요. 이 기기에서 [처음이에요]로 아이디를 만들어 주세요';
     if (/username_taken/.test(raw)) return '이미 쓰고 있는 아이디예요 — 다른 아이디로 해보세요';
     if (/invalid_username/.test(raw)) return '아이디는 영문으로 시작하는 영문·숫자·밑줄 4~20자로 정해 주세요';
-    if (/invalid_password/.test(raw)) return '비밀번호는 6자 이상으로 정해 주세요';
+    if (/invalid_password/.test(raw)) return '비밀번호는 4자 이상으로 정해 주세요';
     if (/already_has_username/.test(raw)) return '이 기기 계정에는 이미 아이디가 있어요 — [로그인]에서 그 아이디로 들어와 주세요';
     if (/unauthorized/.test(raw)) return '내 정보를 다시 확인해야 해요 — 로그인해 주세요';
     if (/Failed to fetch|NetworkError|Load failed/i.test(raw)) return '인터넷 연결을 확인해 주세요';
@@ -2796,7 +2831,7 @@
       el.regId.focus();
       return;
     }
-    if (pw.length < 6) { setAuthMsg(el.regMsg, '비밀번호는 6자 이상으로 정해 주세요'); el.regPw.focus(); return; }
+    if (pw.length < 4) { setAuthMsg(el.regMsg, '비밀번호는 4자 이상으로 정해 주세요'); el.regPw.focus(); return; }
 
     state.authBusy = true;
     setBtnBusy(el.btnRegister, true, '만드는 중…');
@@ -2868,12 +2903,12 @@
     el.btnCopy.addEventListener('click', copyMyLink);
     el.btnUpdate.addEventListener('click', manualUpdate);
     el.btnAuto.addEventListener('click', () => setAuto(!state.auto));
-    el.btnLocate.addEventListener('click', () => {
-      centerOn(state.me);
-      askLocation({ silent: true });
-    });
+    el.fabLocate.addEventListener('click', focusMyLocation);
+    el.btnSheetHide.addEventListener('click', () => setSheetHidden(true));
+    el.sheetOpen.addEventListener('click', () => setSheetHidden(false));
 
     el.btnCollapse.addEventListener('click', () => {
+      if (state.sheetHidden) { setSheetHidden(false); return; }
       el.sheet.classList.toggle('is-collapsed');
       setTimeout(updateSheetHeight, 240);
     });

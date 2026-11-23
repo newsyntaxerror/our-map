@@ -821,6 +821,77 @@ svg { display: block; }
 .sheet.is-collapsed { padding-bottom: 10px; }
 .sheet.is-collapsed .sheet-grip { margin-bottom: 0; }
 
+/* 시트 완전히 숨기기 — 지도를 넓게 볼 때 */
+.sheet {
+  transition: padding .22s ease, transform .24s cubic-bezier(.22, 1, .36, 1), opacity .2s ease;
+}
+.sheet.is-hidden {
+  transform: translateY(calc(100% + 20px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 지도 위: 내 위치 바로가기 */
+.fab {
+  position: absolute;
+  z-index: 480;
+  right: 14px;
+  bottom: calc(var(--sheet-h) + var(--safe-bottom) + 16px);
+  width: 50px;
+  height: 50px;
+  border-radius: 17px;
+  display: grid;
+  place-items: center;
+  color: var(--accent-deep);
+  background: rgba(255, 255, 255, .97);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, .9);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, .2);
+  transition: bottom .24s cubic-bezier(.22, 1, .36, 1), transform .12s ease;
+}
+.fab svg { width: 25px; height: 25px; }
+.fab:active { transform: scale(.93); }
+.app.is-route .fab { display: none; }
+
+/* 시트를 숨겼을 때: 메뉴 열기 알약 */
+.sheet-open {
+  position: absolute;
+  z-index: 610;
+  left: 50%;
+  bottom: calc(var(--safe-bottom) + 12px);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #fff;
+  background: linear-gradient(135deg, #13c9b0, #0aa08c);
+  box-shadow: 0 10px 24px rgba(10, 160, 140, .34), inset 0 1px 0 rgba(255, 255, 255, .28);
+  animation: sheet-open-in .24s cubic-bezier(.22, 1, .36, 1);
+}
+.sheet-open svg { width: 16px; height: 16px; }
+.sheet-open:active { transform: translateX(-50%) scale(.95); }
+.sheet-open-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 800;
+  display: inline-grid;
+  place-items: center;
+}
+.app.is-route .sheet-open { display: none; }
+@keyframes sheet-open-in {
+  from { transform: translate(-50%, 12px); opacity: 0; }
+}
+
 /* ───────────── 토스트 ───────────── */
 .toast {
   position: absolute;

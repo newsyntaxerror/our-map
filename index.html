@@ -24,7 +24,7 @@
 <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <link rel="stylesheet" href="./vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="./styles.css?v=15">
+<link rel="stylesheet" href="./styles.css?v=16">
 <script>
   /* 화면 확인용: 콘솔 에러를 남겨 두면 개발자도구 없이도 읽을 수 있습니다. */
   window.__ERRORS__ = [];
@@ -93,7 +93,7 @@
         </label>
         <label class="field">
           <span class="field-label">비밀번호</span>
-          <input id="regPw" class="field-input" type="password" maxlength="72" placeholder="6자 이상"
+          <input id="regPw" class="field-input" type="password" maxlength="72" placeholder="4자 이상"
                  autocomplete="new-password" enterkeyhint="go">
         </label>
         <p class="carry-note" id="carryNote" hidden>
@@ -153,9 +153,9 @@
         <button class="tab" id="tabChat" type="button" data-tab="chat">채팅 <span class="tab-badge" id="chatBadge" hidden>0</span></button>
       </div>
       <div class="sheet-head-actions">
-        <button class="sheet-more sheet-more--plain" id="btnLocate" type="button" aria-label="내 위치로 이동">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.1" fill="currentColor"/><circle cx="12" cy="12" r="7.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 2.7v2M12 19.3v2M2.7 12h2M19.3 12h2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-          내 위치
+        <button class="sheet-more sheet-more--plain" id="btnSheetHide" type="button" aria-label="메뉴 접기" title="메뉴 접기">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5 12 15.5 18 9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          메뉴
         </button>
         <button class="sheet-more" id="btnAddFriend2" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 19.5v-1.6c0-2-1.7-3.6-3.7-3.6H6.8c-2 0-3.7 1.6-3.7 3.6v1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="9" cy="7.3" r="3.4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M18.4 8.2v5.6M15.6 11h5.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
@@ -202,6 +202,18 @@
       <div class="convo-list" id="convoList"></div>
     </div>
   </section>
+
+  <!-- 지도 위: 내 위치 바로가기 -->
+  <button class="fab" id="fabLocate" type="button" aria-label="내 위치로 이동" title="내 위치로 이동">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" fill="currentColor"/><circle cx="12" cy="12" r="7.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.4v2.4M12 19.2v2.4M2.4 12h2.4M19.2 12h2.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+  </button>
+
+  <!-- 시트를 접었을 때: 메뉴 다시 열기 -->
+  <button class="sheet-open" id="sheetOpen" type="button" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 14.5 12 8.5 18 14.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    메뉴 열기
+    <span class="sheet-open-badge" id="sheetOpenBadge" hidden>0</span>
+  </button>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
@@ -336,7 +348,7 @@
         </label>
         <label class="field">
           <span class="field-label">비밀번호</span>
-          <input id="idPw" class="field-input" type="password" maxlength="72" placeholder="6자 이상"
+          <input id="idPw" class="field-input" type="password" maxlength="72" placeholder="4자 이상"
                  autocomplete="new-password" enterkeyhint="go">
         </label>
         <p class="auth-msg" id="idMsg" hidden></p>
@@ -409,7 +421,7 @@
 </main>
 
 <script src="./vendor/leaflet/leaflet.js"></script>
-<script src="./config.js?v=15"></script>
-<script src="./app.js?v=15"></script>
+<script src="./config.js?v=16"></script>
+<script src="./app.js?v=16"></script>
 </body>
 </html>
